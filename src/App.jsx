@@ -1,8 +1,9 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   Search, ArrowLeft, ExternalLink, Unlock, FileText, CheckCircle2, 
   Copy, Filter, AlertCircle, Calendar, Clock, List, Leaf, Mountain, Dna, Loader2, 
-  Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown
+  Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown,
+  Trophy, Sparkles, Flame
 } from 'lucide-react';
 import { JOURNALS, ALL_ISSNS } from './config/journals';
 
@@ -84,6 +85,16 @@ const GEOLOGIA_KEYWORDS = [
   'stratigraphy', 'estratigrafía', 'sediment', 'geomorfología', 'geomorphology'
 ];
 
+const QUICK_SEARCH_TOPICS = [
+  { label: 'Evolución y Selección Natural', query: 'evolution natural selection' },
+  { label: 'Tectónica de Placas y Geología', query: 'plate tectonics earth science' },
+  { label: 'Genética y Errores Conceptuales', query: 'genetics misconceptions' },
+  { label: 'Ecología y Biodiversidad', query: 'biodiversity ecosystem ecology' },
+  { label: 'Educación Ambiental y Clima', query: 'climate change environmental education' },
+  { label: 'Indagación y Prácticas', query: 'inquiry science laboratory' },
+  { label: 'Biología Celular y Bioquímica', query: 'cell biology biochemistry' }
+];
+
 export default function App() {
   const [articles, setArticles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -93,7 +104,7 @@ export default function App() {
   const [showAppInfo, setShowAppInfo] = useState(false);
   const [showFilterInfo, setShowFilterInfo] = useState(false);
   
-  // Estados de Filtros
+  // Estados de Filtros de Novedades
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedJournal, setSelectedJournal] = useState("Todas las revistas");
   const [selectedPeriod, setSelectedPeriod] = useState("all");
@@ -104,6 +115,16 @@ export default function App() {
   // Ordenación y Paginación
   const [sortBy, setSortBy] = useState("date_desc");
   const [visibleCount, setVisibleCount] = useState(20);
+
+  // Pestaña de Artículos Más Citados e Impacto
+  const [impactArticles, setImpactArticles] = useState([]);
+  const [isLoadingImpact, setIsLoadingImpact] = useState(false);
+  const [impactError, setImpactError] = useState(null);
+  const [impactSearchInput, setImpactSearchInput] = useState("");
+  const [impactActiveQuery, setImpactActiveQuery] = useState("");
+  const [impactSelectedJournal, setImpactSelectedJournal] = useState("Todas las revistas");
+  const [impactLimit, setImpactLimit] = useState(50);
+  const [hasFetchedImpactOnce, setHasFetchedImpactOnce] = useState(false);
 
   // Pestañas Personalizadas
   const [customTabs, setCustomTabs] = useState(() => {
@@ -116,6 +137,7 @@ export default function App() {
   const [translateFeedback, setTranslateFeedback] = useState(null);
   const [viewMode, setViewMode] = useState("radar"); 
 
+  // Carga inicial del radar de novedades
   useEffect(() => {
     const fetchArticles = async () => {
       setIsLoading(true);
@@ -178,6 +200,85 @@ export default function App() {
     };
     fetchArticles();
   }, []);
+
+  // Función para buscar en el Explorador de Impacto / Más Citados
+  const fetchImpactArticles = useCallback(async (query = "", journal = "Todas las revistas", limit = 50) => {
+    setIsLoadingImpact(true);
+    setImpactError(null);
+    try {
+      let targetIssns = ALL_ISSNS;
+      if (journal !== "Todas las revistas") {
+        const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
+        if (found && found.issns.length) {
+          targetIssns = found.issns.join('|');
+        }
+      }
+
+      const searchQuery = query.trim() ? `&search=${encodeURIComponent(query.trim())}` : '';
+      const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
+      
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Error al consultar artículos más citados.");
+      const data = await res.json();
+
+      const parsed = (data.results || []).map(work => {
+        const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
+        return {
+          id: work.id || Math.random().toString(),
+          title: work.title || "Título no disponible",
+          authors: work.authorships?.length > 0 
+            ? work.authorships.map(a => a.author?.display_name).filter(Boolean) 
+            : ["Autores desconocidos"],
+          journal: work.primary_location?.source?.display_name || "Revista Científica",
+          year: work.publication_year || "Año desconocido",
+          date: work.publication_date || "",
+          isOpenAccess: work.open_access?.is_oa || false,
+          pdfUrl: pdfUrl,
+          citedBy: work.cited_by_count || 0,
+          url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
+          abstract: reconstruirAbstract(work.abstract_inverted_index),
+          tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
+          diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
+        };
+      });
+
+      setImpactArticles(parsed);
+      setHasFetchedImpactOnce(true);
+    } catch (err) {
+      setImpactError("No se pudieron cargar los artículos más citados. Comprueba tu conexión.");
+    } finally {
+      setIsLoadingImpact(false);
+    }
+  }, []);
+
+  // Cargar impacto la primera vez que se selecciona la pestaña
+  useEffect(() => {
+    if (viewMode === 'impacto' && !hasFetchedImpactOnce) {
+      fetchImpactArticles("", impactSelectedJournal, impactLimit);
+    }
+  }, [viewMode, hasFetchedImpactOnce, impactSelectedJournal, impactLimit, fetchImpactArticles]);
+
+  const handleImpactSearchSubmit = (e) => {
+    if (e) e.preventDefault();
+    setImpactActiveQuery(impactSearchInput);
+    fetchImpactArticles(impactSearchInput, impactSelectedJournal, impactLimit);
+  };
+
+  const handleSelectQuickTopic = (topicQuery) => {
+    setImpactSearchInput(topicQuery);
+    setImpactActiveQuery(topicQuery);
+    fetchImpactArticles(topicQuery, impactSelectedJournal, impactLimit);
+  };
+
+  const handleImpactJournalChange = (journal) => {
+    setImpactSelectedJournal(journal);
+    fetchImpactArticles(impactActiveQuery, journal, impactLimit);
+  };
+
+  const handleImpactLimitChange = (limit) => {
+    setImpactLimit(limit);
+    fetchImpactArticles(impactActiveQuery, impactSelectedJournal, limit);
+  };
 
   // Reiniciar conteo visible cuando cambian filtros o vista
   useEffect(() => {
@@ -367,7 +468,7 @@ Idea principal:
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const ArticleCard = ({ article }) => (
+  const ArticleCard = ({ article, highlightQuery = searchTerm }) => (
     <div 
       onClick={() => { setSelectedArticle(article); window.scrollTo(0,0); }} 
       className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 hover:shadow-md hover:border-emerald-400 transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-4 group"
@@ -379,8 +480,8 @@ Idea principal:
           <span>{article.date || article.year}</span>
           
           {/* Métrica de Citas */}
-          <span className="flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200" title="Citas recibidas según OpenAlex">
-            <Award size={12} className="text-amber-500"/> {article.citedBy} {article.citedBy === 1 ? 'cita' : 'citas'}
+          <span className="flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-200" title="Citas registradas en OpenAlex">
+            <Trophy size={12} className="text-amber-600"/> {article.citedBy} {article.citedBy === 1 ? 'cita' : 'citas'}
           </span>
 
           {/* Acceso Abierto & Botón PDF Directo */}
@@ -405,10 +506,10 @@ Idea principal:
         </div>
 
         <h2 className="text-lg font-bold text-slate-900 group-hover:text-emerald-700 transition-colors leading-tight mb-2">
-          <HighlightText text={article.title} query={searchTerm} />
+          <HighlightText text={article.title} query={highlightQuery} />
         </h2>
         <p className="text-sm text-slate-600 truncate max-w-2xl font-medium mb-3">
-          <HighlightText text={article.authors.join(', ')} query={searchTerm} />
+          <HighlightText text={article.authors.join(', ')} query={highlightQuery} />
         </p>
         <div className="flex flex-wrap gap-1.5">
           {article.tags.map(t => (
@@ -429,7 +530,7 @@ Idea principal:
         <div className="max-w-3xl mx-auto flex-grow w-full">
           <button 
             onClick={() => { setSelectedArticle(null); window.scrollTo(0,0); }} 
-            className="flex items-center gap-2 text-slate-500 hover:text-emerald-700 mb-6 font-semibold transition-colors"
+            className="flex items-center gap-2 text-slate-500 hover:text-emerald-700 mb-6 font-semibold transition-colors cursor-pointer"
           >
             <ArrowLeft size={20} /> Volver al listado
           </button>
@@ -437,9 +538,9 @@ Idea principal:
             <div className="p-6 sm:p-8 border-b border-slate-100">
               <div className="flex items-center gap-3 mb-4 flex-wrap text-xs font-bold uppercase">
                 <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-md">{selectedArticle.journal}</span>
-                <span className="text-slate-400 font-medium">{selectedArticle.date}</span>
-                <span className="flex items-center gap-1 bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-200">
-                  <Award size={14} className="text-amber-500"/> {selectedArticle.citedBy} {selectedArticle.citedBy === 1 ? 'cita' : 'citas'}
+                <span className="text-slate-400 font-medium">{selectedArticle.date || selectedArticle.year}</span>
+                <span className="flex items-center gap-1 bg-amber-50 text-amber-900 border border-amber-200 px-2.5 py-1 rounded-md font-bold">
+                  <Trophy size={14} className="text-amber-600"/> {selectedArticle.citedBy} {selectedArticle.citedBy === 1 ? 'cita' : 'citas'}
                 </span>
                 {selectedArticle.isOpenAccess && (
                   <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200">
@@ -448,7 +549,7 @@ Idea principal:
                 )}
               </div>
               <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-4 leading-tight">
-                <HighlightText text={selectedArticle.title} query={searchTerm} />
+                <HighlightText text={selectedArticle.title} query={viewMode === 'impacto' ? impactActiveQuery : searchTerm} />
               </h1>
               <p className="text-slate-600 font-semibold text-lg">{selectedArticle.authors.join(', ')}</p>
             </div>
@@ -460,10 +561,10 @@ Idea principal:
                 </h3>
                 {!selectedArticle.abstract.includes("no disponible") && (
                   <div className="flex bg-white rounded-lg p-1 border border-slate-200 shadow-sm gap-1">
-                    <button onClick={() => handleExternalTranslate('deepl', selectedArticle.abstract)} className="px-3 py-2 text-xs font-bold rounded-md text-slate-600 hover:bg-emerald-50 hover:text-emerald-700 transition-colors flex items-center gap-2">
+                    <button onClick={() => handleExternalTranslate('deepl', selectedArticle.abstract)} className="px-3 py-2 text-xs font-bold rounded-md text-slate-600 hover:bg-emerald-50 hover:text-emerald-700 transition-colors flex items-center gap-2 cursor-pointer">
                       {translateFeedback === 'deepl' ? <CheckCircle2 size={14} className="text-emerald-600"/> : <Languages size={14} />} DeepL (ES)
                     </button>
-                    <button onClick={() => handleExternalTranslate('softcatala', selectedArticle.abstract)} className="px-3 py-2 text-xs font-bold rounded-md text-slate-600 hover:bg-orange-50 hover:text-orange-700 transition-colors flex items-center gap-2">
+                    <button onClick={() => handleExternalTranslate('softcatala', selectedArticle.abstract)} className="px-3 py-2 text-xs font-bold rounded-md text-slate-600 hover:bg-orange-50 hover:text-orange-700 transition-colors flex items-center gap-2 cursor-pointer">
                       {translateFeedback === 'softcatala' ? <CheckCircle2 size={14} className="text-emerald-600"/> : <Languages size={14} />} Softcatalà (VA)
                     </button>
                   </div>
@@ -471,7 +572,7 @@ Idea principal:
               </div>
               <div className="text-slate-700 leading-relaxed text-lg font-normal">
                 <p className="whitespace-pre-wrap">
-                  <HighlightText text={selectedArticle.abstract} query={searchTerm} />
+                  <HighlightText text={selectedArticle.abstract} query={viewMode === 'impacto' ? impactActiveQuery : searchTerm} />
                 </p>
                 {translateFeedback && (
                   <div className="absolute top-4 right-8 bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-xl animate-bounce">
@@ -494,7 +595,7 @@ Idea principal:
                   </a>
                 )}
               </div>
-              <button onClick={() => handleCopyToMarkdown(selectedArticle)} className={`w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold border transition-all ${copied ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"}`}>
+              <button onClick={() => handleCopyToMarkdown(selectedArticle)} className={`w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold border transition-all cursor-pointer ${copied ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"}`}>
                 {copied ? <><CheckCircle2 size={18} /> ¡Copiado!</> : <><Copy size={18} /> Exportar a Obsidian</>}
               </button>
             </div>
@@ -513,7 +614,7 @@ Idea principal:
     );
   }
 
-  // Componente de control de Ordenación y Contador
+  // Componente de control de Ordenación y Contador para Novedades
   const ToolbarHeader = ({ count }) => (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-2 border-b border-slate-200">
       <p className="text-sm font-bold text-slate-600">
@@ -567,7 +668,7 @@ Idea principal:
                   EduPapers BioGeo
                   <button 
                     onClick={() => setShowAppInfo(true)}
-                    className="p-1 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-full transition-colors"
+                    className="p-1 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-full transition-colors cursor-pointer"
                     title="Información sobre la aplicación y revistas"
                   >
                     <Info size={18} />
@@ -577,36 +678,39 @@ Idea principal:
               </div>
             </div>
             
-            <div className="flex w-full md:w-auto gap-2">
-              <div className="relative flex-grow sm:w-64">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input 
-                  type="text" 
-                  className="w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg bg-slate-50 text-sm font-medium focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-none" 
-                  placeholder="Buscar título o autores..." 
-                  value={searchTerm} 
-                  onChange={(e) => setSearchTerm(e.target.value)} 
-                  disabled={isLoading} 
-                />
-                {searchTerm && (
-                  <button onClick={() => setSearchTerm("")} className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600">
-                    <X size={16} />
-                  </button>
-                )}
+            {/* Buscador para vistas de Novedades */}
+            {viewMode !== 'impacto' && (
+              <div className="flex w-full md:w-auto gap-2">
+                <div className="relative flex-grow sm:w-64">
+                  <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                  <input 
+                    type="text" 
+                    className="w-full pl-10 pr-8 py-2 border border-slate-300 rounded-lg bg-slate-50 text-sm font-medium focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-none" 
+                    placeholder="Buscar título o autores..." 
+                    value={searchTerm} 
+                    onChange={(e) => setSearchTerm(e.target.value)} 
+                    disabled={isLoading} 
+                  />
+                  {searchTerm && (
+                    <button onClick={() => setSearchTerm("")} className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer">
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+                <button 
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold transition-colors cursor-pointer ${showFilters || activeFiltersCount > 0 ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <Filter size={16} />
+                  <span className="hidden sm:inline">Filtros</span>
+                  {activeFiltersCount > 0 && <span className="bg-emerald-700 text-white text-xs px-1.5 py-0.5 rounded-full">{activeFiltersCount}</span>}
+                </button>
               </div>
-              <button 
-                onClick={() => setShowFilters(!showFilters)}
-                className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-bold transition-colors ${showFilters || activeFiltersCount > 0 ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'}`}
-              >
-                <Filter size={16} />
-                <span className="hidden sm:inline">Filtros</span>
-                {activeFiltersCount > 0 && <span className="bg-emerald-700 text-white text-xs px-1.5 py-0.5 rounded-full">{activeFiltersCount}</span>}
-              </button>
-            </div>
+            )}
           </div>
 
-          {/* Panel de Filtros Avanzados */}
-          {showFilters && (
+          {/* Panel de Filtros Avanzados (para vistas de novedades) */}
+          {showFilters && viewMode !== 'impacto' && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4 shadow-inner animate-in fade-in slide-in-from-top-2">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                 {/* Filtro Revista */}
@@ -642,7 +746,7 @@ Idea principal:
                   <label className="flex items-center gap-2 cursor-pointer bg-white border border-slate-300 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors h-[38px] w-full">
                     <input 
                       type="checkbox" 
-                      className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                      className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
                       checked={onlyOA}
                       onChange={(e) => setOnlyOA(e.target.checked)}
                     />
@@ -655,7 +759,7 @@ Idea principal:
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1"><Tag size={14}/> Conceptos Clave (Auto-detectados)</label>
-                  <button onClick={() => setShowFilterInfo(true)} className="text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50 p-1 rounded-full transition-colors flex items-center gap-1 text-xs font-bold">
+                  <button onClick={() => setShowFilterInfo(true)} className="text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50 p-1 rounded-full transition-colors flex items-center gap-1 text-xs font-bold cursor-pointer">
                     <HelpCircle size={14} /> ¿Qué es esto?
                   </button>
                 </div>
@@ -664,7 +768,7 @@ Idea principal:
                     <button
                       key={tag}
                       onClick={() => toggleTag(tag)}
-                      className={`text-xs px-3 py-1.5 rounded-full font-medium transition-all ${selectedTags.includes(tag) ? 'bg-emerald-700 text-white shadow-md' : 'bg-white border border-slate-300 text-slate-600 hover:border-emerald-400 hover:text-emerald-700'}`}
+                      className={`text-xs px-3 py-1.5 rounded-full font-medium transition-all cursor-pointer ${selectedTags.includes(tag) ? 'bg-emerald-700 text-white shadow-md' : 'bg-white border border-slate-300 text-slate-600 hover:border-emerald-400 hover:text-emerald-700'}`}
                     >
                       {tag}
                     </button>
@@ -703,6 +807,11 @@ Idea principal:
               <button onClick={() => {resetFilters(); setViewMode('geologia');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'geologia' ? 'border-amber-600 text-amber-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <Mountain size={16}/> Geología ({articulosGeologia.length})
               </button>
+
+              {/* NUEVA PESTAÑA: MÁS CITADOS / CLÁSICOS */}
+              <button onClick={() => setViewMode('impacto')} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'impacto' ? 'border-amber-500 text-amber-900 bg-amber-50/50 px-2.5 rounded-t-lg' : 'border-transparent text-amber-700 hover:text-amber-900'}`}>
+                <Trophy size={16} className="text-amber-500"/> Más Citados
+              </button>
               
               {/* Pestañas Personalizadas del Usuario */}
               {customTabs.map(tab => (
@@ -736,6 +845,139 @@ Idea principal:
           </div>
         ) : error ? (
           <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex gap-4"><AlertCircle/><p className="font-medium">{error}</p></div>
+        ) : viewMode === 'impacto' ? (
+          /* ========================================================= */
+          /* PESTAÑA DINÁMICA: MÁS CITADOS / EXPLORADOR DE IMPACTO     */
+          /* ========================================================= */
+          <div className="space-y-6">
+            <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-emerald-500/10 border border-amber-200 p-6 rounded-2xl shadow-sm">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="bg-amber-500 text-white p-2 rounded-xl shadow">
+                  <Trophy size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900">Explorador de Clásicos e Impacto</h2>
+                  <p className="text-xs text-slate-600 font-medium">Busca las investigaciones con mayor número de citas sobre cualquier temática en las 24 revistas</p>
+                </div>
+              </div>
+
+              {/* Formulario de Búsqueda Temática */}
+              <form onSubmit={handleImpactSearchSubmit} className="mt-4 flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-grow">
+                  <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
+                  <input 
+                    type="text" 
+                    value={impactSearchInput}
+                    onChange={e => setImpactSearchInput(e.target.value)}
+                    placeholder="Buscar tema: ej. fotosíntesis, evolución, tectónica, clima, indagación..."
+                    className="w-full pl-10 pr-10 py-2.5 bg-white border border-slate-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-amber-500 focus:outline-none shadow-sm"
+                  />
+                  {impactSearchInput && (
+                    <button 
+                      type="button" 
+                      onClick={() => { setImpactSearchInput(""); setImpactActiveQuery(""); fetchImpactArticles("", impactSelectedJournal, impactLimit); }} 
+                      className="absolute right-3 top-3 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+                <button 
+                  type="submit" 
+                  disabled={isLoadingImpact}
+                  className="bg-amber-600 hover:bg-amber-700 text-white px-6 py-2.5 rounded-xl font-bold text-sm transition-all shadow flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isLoadingImpact ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+                  Buscar Más Citados
+                </button>
+              </form>
+
+              {/* Controles de Revista y Cantidad */}
+              <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-4 border-t border-amber-200/60 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-slate-600">Revista:</span>
+                  <select 
+                    value={impactSelectedJournal} 
+                    onChange={e => handleImpactJournalChange(e.target.value)}
+                    className="bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 font-semibold text-slate-700 focus:ring-2 focus:ring-amber-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="Todas las revistas">Todas las 24 revistas</option>
+                    {JOURNALS.map(j => <option key={j.name} value={j.name}>{j.name}</option>)}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-600">Mostrar:</span>
+                  {[25, 50, 100].map(lim => (
+                    <button
+                      key={lim}
+                      onClick={() => handleImpactLimitChange(lim)}
+                      className={`px-2.5 py-1 rounded-md font-bold transition-all cursor-pointer ${impactLimit === lim ? 'bg-amber-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-amber-50'}`}
+                    >
+                      Top {lim}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Chips Temáticos Rápidos */}
+              <div className="mt-4 pt-3 border-t border-amber-200/60">
+                <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <Sparkles size={12} className="text-amber-600"/> Temas populares sugeridos (1 clic):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {QUICK_SEARCH_TOPICS.map(item => (
+                    <button
+                      key={item.label}
+                      onClick={() => handleSelectQuickTopic(item.query)}
+                      className={`text-xs px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${impactActiveQuery === item.query ? 'bg-amber-700 text-white shadow-sm' : 'bg-white/80 hover:bg-white text-slate-700 border border-slate-200 hover:border-amber-400'}`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Listado de Artículos Más Citados */}
+            {isLoadingImpact ? (
+              <div className="flex flex-col items-center py-16 text-slate-500 text-center">
+                <Loader2 size={36} className="animate-spin mb-3 text-amber-600" />
+                <p className="font-bold text-base">Consultando publicaciones más citadas en OpenAlex...</p>
+                <p className="text-xs text-slate-400">Ordenando por recuento histórico de citas.</p>
+              </div>
+            ) : impactError ? (
+              <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex gap-4"><AlertCircle/><p className="font-medium">{impactError}</p></div>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    <Trophy size={16} className="text-amber-500" />
+                    {impactActiveQuery ? (
+                      <>Más citados sobre <span className="text-amber-800 underline font-extrabold">"{impactActiveQuery}"</span> ({impactArticles.length})</>
+                    ) : (
+                      <>Top {impactArticles.length} Artículos Más Citados de la Historia</>
+                    )}
+                  </h3>
+                  {impactSelectedJournal !== "Todas las revistas" && (
+                    <span className="text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                      {impactSelectedJournal}
+                    </span>
+                  )}
+                </div>
+
+                {impactArticles.length > 0 ? (
+                  <div className="space-y-4">
+                    {impactArticles.map(a => <ArticleCard key={a.id} article={a} highlightQuery={impactActiveQuery} />)}
+                  </div>
+                ) : (
+                  <div className="p-12 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">
+                    No se encontraron artículos con esa combinación de búsqueda. Prueba con términos más generales (ej. "biology", "geology", "genetics").
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <div>
             {/* Si hay filtros activos Y NO estamos en una pestaña base, mostramos los resultados filtrados globalmente */}
@@ -876,18 +1118,18 @@ Idea principal:
             </div>
             <div className="p-6 space-y-6">
               <div>
+                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Trophy className="text-amber-500" size={18}/> Pestaña "Más Citados"</h3>
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Consulta directamente los clásicos históricos más influyentes de nuestras 24 revistas. Puedes buscar cualquier término temático (ej. "evolución", "tectónica") para ver los estudios más referenciados de todos los tiempos sobre ese asunto.
+                </p>
+              </div>
+
+              <div>
                 <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Tag className="text-emerald-700" size={18}/> Conceptos Clave y Resaltado</h3>
                 <p className="text-sm text-slate-600 leading-relaxed">
                   OpenAlex clasifica automáticamente el <i>abstract</i> y título de cada investigación mediante modelos semánticos conectados a ontologías científicas globales.
                   <br/><br/>
                   Además, al escribir cualquier término en el buscador, las palabras encontradas se resaltarán automáticamente en los títulos y resúmenes.
-                </p>
-              </div>
-
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Award className="text-amber-500" size={18}/> Métrica de Citas</h3>
-                <p className="text-sm text-slate-600 leading-relaxed">
-                  Puedes ordenar las publicaciones por número de citas para identificar rápidamente cuáles son los estudios más influyentes o de mayor impacto de cada revista.
                 </p>
               </div>
 
