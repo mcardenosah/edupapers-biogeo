@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Search, ArrowLeft, ExternalLink, Unlock, FileText, CheckCircle2, 
   Copy, Filter, AlertCircle, Calendar, Clock, List, Leaf, Mountain, Dna, Loader2, 
-  Languages, Tag, X, Save, Info, Globe, HelpCircle
+  Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown
 } from 'lucide-react';
 import { JOURNALS, ALL_ISSNS } from './config/journals';
 
@@ -33,6 +33,36 @@ const calcularDiasTranscurridos = (fechaPublicacion) => {
   } catch (e) {
     return 999;
   }
+};
+
+const HighlightText = ({ text, query }) => {
+  if (!query || !query.trim() || !text) return <>{text}</>;
+  const lowerQuery = query.trim().toLowerCase();
+  const strText = String(text);
+  if (!strText.toLowerCase().includes(lowerQuery)) return <>{text}</>;
+
+  const parts = [];
+  let remaining = strText;
+  let keyIndex = 0;
+
+  while (remaining.length > 0) {
+    const idx = remaining.toLowerCase().indexOf(lowerQuery);
+    if (idx === -1) {
+      parts.push(remaining);
+      break;
+    }
+    if (idx > 0) {
+      parts.push(remaining.substring(0, idx));
+    }
+    const matchText = remaining.substring(idx, idx + lowerQuery.length);
+    parts.push(
+      <mark key={keyIndex++} className="bg-amber-200 text-amber-950 font-semibold px-0.5 rounded">
+        {matchText}
+      </mark>
+    );
+    remaining = remaining.substring(idx + lowerQuery.length);
+  }
+  return <>{parts}</>;
 };
 
 const BIOLOGIA_KEYWORDS = [
@@ -66,9 +96,14 @@ export default function App() {
   // Estados de Filtros
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedJournal, setSelectedJournal] = useState("Todas las revistas");
+  const [selectedPeriod, setSelectedPeriod] = useState("all");
   const [selectedTags, setSelectedTags] = useState([]);
   const [onlyOA, setOnlyOA] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
+
+  // Ordenación y Paginación
+  const [sortBy, setSortBy] = useState("date_desc");
+  const [visibleCount, setVisibleCount] = useState(20);
 
   // Pestañas Personalizadas
   const [customTabs, setCustomTabs] = useState(() => {
@@ -110,6 +145,7 @@ export default function App() {
             data.results.forEach(work => {
               if (!seenIds.has(work.id)) {
                 seenIds.add(work.id);
+                const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
                 combined.push({
                   id: work.id || Math.random().toString(),
                   title: work.title || "Título no disponible",
@@ -120,6 +156,8 @@ export default function App() {
                   year: work.publication_year || "Año desconocido",
                   date: work.publication_date || "",
                   isOpenAccess: work.open_access?.is_oa || false,
+                  pdfUrl: pdfUrl,
+                  citedBy: work.cited_by_count || 0,
                   url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
                   abstract: reconstruirAbstract(work.abstract_inverted_index),
                   tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
@@ -141,6 +179,11 @@ export default function App() {
     fetchArticles();
   }, []);
 
+  // Reiniciar conteo visible cuando cambian filtros o vista
+  useEffect(() => {
+    setVisibleCount(20);
+  }, [searchTerm, selectedJournal, selectedPeriod, selectedTags, onlyOA, sortBy, viewMode]);
+
   const popularTags = useMemo(() => {
     const counts = {};
     articles.forEach(a => a.tags.forEach(t => {
@@ -158,16 +201,40 @@ export default function App() {
   }, [articles]);
 
   const filteredArticles = useMemo(() => {
-    return articles.filter(article => {
+    let result = articles.filter(article => {
       const safeText = `${article.title} ${article.authors.join(' ')} ${article.abstract}`.toLowerCase();
       const matchesSearch = safeText.includes(searchTerm.toLowerCase());
       const matchesJournal = selectedJournal === "Todas las revistas" || article.journal === selectedJournal;
       const matchesTags = selectedTags.length === 0 || selectedTags.every(tag => article.tags.includes(tag));
       const matchesOA = !onlyOA || article.isOpenAccess;
 
-      return matchesSearch && matchesJournal && matchesTags && matchesOA;
+      let matchesPeriod = true;
+      if (selectedPeriod === "30d") {
+        matchesPeriod = article.diasTranscurridos <= 30;
+      } else if (selectedPeriod === "2026") {
+        matchesPeriod = String(article.year) === "2026";
+      } else if (selectedPeriod === "2025") {
+        matchesPeriod = String(article.year) === "2025";
+      } else if (selectedPeriod === "older") {
+        matchesPeriod = Number(article.year) <= 2024;
+      }
+
+      return matchesSearch && matchesJournal && matchesTags && matchesOA && matchesPeriod;
     });
-  }, [searchTerm, selectedJournal, selectedTags, onlyOA, articles]);
+
+    // Ordenación
+    return result.sort((a, b) => {
+      if (sortBy === "cited_desc") {
+        return (b.citedBy || 0) - (a.citedBy || 0);
+      } else if (sortBy === "journal_asc") {
+        return (a.journal || "").localeCompare(b.journal || "");
+      } else if (sortBy === "title_asc") {
+        return (a.title || "").localeCompare(b.title || "");
+      }
+      // date_desc (por defecto)
+      return new Date(b.date || 0) - new Date(a.date || 0);
+    });
+  }, [searchTerm, selectedJournal, selectedPeriod, selectedTags, onlyOA, sortBy, articles]);
 
   const { hoy, semana } = useMemo(() => {
     const rHoy = [];
@@ -201,8 +268,10 @@ export default function App() {
       name,
       searchTerm,
       selectedJournal,
+      selectedPeriod,
       selectedTags,
-      onlyOA
+      onlyOA,
+      sortBy
     };
     const updated = [...customTabs, newTab];
     setCustomTabs(updated);
@@ -219,18 +288,22 @@ export default function App() {
   };
 
   const applyCustomTabFilters = (tab) => {
-    setSearchTerm(tab.searchTerm);
-    setSelectedJournal(tab.selectedJournal);
-    setSelectedTags(tab.selectedTags);
-    setOnlyOA(tab.onlyOA);
+    setSearchTerm(tab.searchTerm || "");
+    setSelectedJournal(tab.selectedJournal || "Todas las revistas");
+    setSelectedPeriod(tab.selectedPeriod || "all");
+    setSelectedTags(tab.selectedTags || []);
+    setOnlyOA(tab.onlyOA || false);
+    if (tab.sortBy) setSortBy(tab.sortBy);
     setViewMode(`custom_${tab.id}`);
   };
 
   const resetFilters = () => {
     setSearchTerm("");
     setSelectedJournal("Todas las revistas");
+    setSelectedPeriod("all");
     setSelectedTags([]);
     setOnlyOA(false);
+    setSortBy("date_desc");
   };
 
   const toggleTag = (tag) => {
@@ -267,12 +340,14 @@ tags:
 ${formattedTags}
 fecha: ${today}
 revista: "${safeJournal}"
+citas: ${article.citedBy}
 archivo: "${article.url}"
 ---
 # ${safeTitle}
 
 📄 Documento Original
 [Enlace a la fuente (${safeJournal})](${article.url})
+${article.pdfUrl ? `[Descargar PDF directo](${article.pdfUrl})` : ''}
 
 🧠 Mis Notas y Reflexiones Pedagógicas
 (Espacio libre para anotar aplicaciones de aula o reflexiones teóricas)
@@ -302,13 +377,38 @@ Idea principal:
           <span className="text-emerald-700 font-bold">{article.journal}</span>
           <span className="text-slate-300 hidden sm:inline">•</span>
           <span>{article.date || article.year}</span>
-          {article.isOpenAccess && <Unlock size={12} className="text-emerald-600" title="Acceso Abierto" />}
+          
+          {/* Métrica de Citas */}
+          <span className="flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200" title="Citas recibidas según OpenAlex">
+            <Award size={12} className="text-amber-500"/> {article.citedBy} {article.citedBy === 1 ? 'cita' : 'citas'}
+          </span>
+
+          {/* Acceso Abierto & Botón PDF Directo */}
+          {article.isOpenAccess && (
+            <span className="flex items-center gap-1 text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[11px]">
+              <Unlock size={12} className="text-emerald-600"/> Open Access
+            </span>
+          )}
+
+          {article.pdfUrl && (
+            <a 
+              href={article.pdfUrl} 
+              target="_blank" 
+              rel="noopener noreferrer" 
+              onClick={e => e.stopPropagation()} 
+              className="flex items-center gap-1 text-[11px] font-bold text-white bg-emerald-700 hover:bg-emerald-800 px-2 py-0.5 rounded shadow-sm transition-colors"
+              title="Descargar PDF directo"
+            >
+              <Download size={12}/> PDF
+            </a>
+          )}
         </div>
+
         <h2 className="text-lg font-bold text-slate-900 group-hover:text-emerald-700 transition-colors leading-tight mb-2">
-          {article.title}
+          <HighlightText text={article.title} query={searchTerm} />
         </h2>
         <p className="text-sm text-slate-600 truncate max-w-2xl font-medium mb-3">
-          {article.authors.join(', ')}
+          <HighlightText text={article.authors.join(', ')} query={searchTerm} />
         </p>
         <div className="flex flex-wrap gap-1.5">
           {article.tags.map(t => (
@@ -320,6 +420,8 @@ Idea principal:
       </div>
     </div>
   );
+
+  const activeFiltersCount = selectedTags.length + (onlyOA ? 1 : 0) + (selectedJournal !== "Todas las revistas" ? 1 : 0) + (selectedPeriod !== "all" ? 1 : 0) + (searchTerm ? 1 : 0);
 
   if (selectedArticle) {
     return (
@@ -336,9 +438,18 @@ Idea principal:
               <div className="flex items-center gap-3 mb-4 flex-wrap text-xs font-bold uppercase">
                 <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-md">{selectedArticle.journal}</span>
                 <span className="text-slate-400 font-medium">{selectedArticle.date}</span>
-                {selectedArticle.isOpenAccess && <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200"><Unlock size={14}/> Open Access</span>}
+                <span className="flex items-center gap-1 bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-200">
+                  <Award size={14} className="text-amber-500"/> {selectedArticle.citedBy} {selectedArticle.citedBy === 1 ? 'cita' : 'citas'}
+                </span>
+                {selectedArticle.isOpenAccess && (
+                  <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200">
+                    <Unlock size={14}/> Open Access
+                  </span>
+                )}
               </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-4 leading-tight">{selectedArticle.title}</h1>
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-4 leading-tight">
+                <HighlightText text={selectedArticle.title} query={searchTerm} />
+              </h1>
               <p className="text-slate-600 font-semibold text-lg">{selectedArticle.authors.join(', ')}</p>
             </div>
             
@@ -359,7 +470,9 @@ Idea principal:
                 )}
               </div>
               <div className="text-slate-700 leading-relaxed text-lg font-normal">
-                <p className="whitespace-pre-wrap">{selectedArticle.abstract}</p>
+                <p className="whitespace-pre-wrap">
+                  <HighlightText text={selectedArticle.abstract} query={searchTerm} />
+                </p>
                 {translateFeedback && (
                   <div className="absolute top-4 right-8 bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-xl animate-bounce">
                     ¡Copiado! Pega el texto (Ctrl+V)
@@ -368,13 +481,20 @@ Idea principal:
               </div>
             </div>
 
-            <div className="p-6 sm:p-8 bg-white flex flex-col sm:flex-row gap-4 justify-between items-center">
-              {selectedArticle.url !== "#" ? (
-                <a href={selectedArticle.url} target="_blank" rel="noopener noreferrer" className="w-full sm:w-auto flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-8 py-3.5 rounded-xl font-bold transition-all shadow-md">
-                  Ir a la fuente <ExternalLink size={18} />
-                </a>
-              ) : <span className="text-slate-400 italic">Fuente no disponible</span>}
-              <button onClick={() => handleCopyToMarkdown(selectedArticle)} className={`w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl font-bold border transition-all ${copied ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"}`}>
+            <div className="p-6 sm:p-8 bg-white flex flex-col sm:flex-row gap-3 justify-between items-center flex-wrap">
+              <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                {selectedArticle.pdfUrl && (
+                  <a href={selectedArticle.pdfUrl} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-6 py-3.5 rounded-xl font-bold transition-all shadow-md">
+                    <Download size={18} /> Descargar PDF
+                  </a>
+                )}
+                {selectedArticle.url !== "#" && (
+                  <a href={selectedArticle.url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-900 text-white px-6 py-3.5 rounded-xl font-bold transition-all shadow-md">
+                    Ir a la fuente <ExternalLink size={18} />
+                  </a>
+                )}
+              </div>
+              <button onClick={() => handleCopyToMarkdown(selectedArticle)} className={`w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold border transition-all ${copied ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"}`}>
                 {copied ? <><CheckCircle2 size={18} /> ¡Copiado!</> : <><Copy size={18} /> Exportar a Obsidian</>}
               </button>
             </div>
@@ -393,7 +513,44 @@ Idea principal:
     );
   }
 
-  const activeFiltersCount = selectedTags.length + (onlyOA ? 1 : 0) + (selectedJournal !== "Todas las revistas" ? 1 : 0) + (searchTerm ? 1 : 0);
+  // Componente de control de Ordenación y Contador
+  const ToolbarHeader = ({ count }) => (
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-2 border-b border-slate-200">
+      <p className="text-sm font-bold text-slate-600">
+        Mostrando <span className="text-emerald-800 font-extrabold">{Math.min(visibleCount, count)}</span> de <span className="text-slate-900">{count}</span> publicaciones
+      </p>
+      <div className="flex items-center gap-2 self-end sm:self-auto">
+        <label className="text-xs font-bold text-slate-500 flex items-center gap-1">
+          <ArrowUpDown size={14} /> Ordenar:
+        </label>
+        <select 
+          value={sortBy} 
+          onChange={e => setSortBy(e.target.value)}
+          className="text-xs font-semibold bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer"
+        >
+          <option value="date_desc">Más recientes primero</option>
+          <option value="cited_desc">Más citados (Impacto)</option>
+          <option value="journal_asc">Revista (A-Z)</option>
+          <option value="title_asc">Título (A-Z)</option>
+        </select>
+      </div>
+    </div>
+  );
+
+  // Botón de Cargar Más
+  const LoadMoreButton = ({ total }) => {
+    if (total <= visibleCount) return null;
+    return (
+      <div className="flex justify-center pt-8 pb-4">
+        <button 
+          onClick={() => setVisibleCount(prev => prev + 20)}
+          className="flex items-center gap-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold px-6 py-3 rounded-xl transition-all shadow-sm hover:shadow cursor-pointer"
+        >
+          <ChevronDown size={18} /> Cargar más publicaciones (quedan {total - visibleCount})
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800 relative flex flex-col">
@@ -431,6 +588,11 @@ Idea principal:
                   onChange={(e) => setSearchTerm(e.target.value)} 
                   disabled={isLoading} 
                 />
+                {searchTerm && (
+                  <button onClick={() => setSearchTerm("")} className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600">
+                    <X size={16} />
+                  </button>
+                )}
               </div>
               <button 
                 onClick={() => setShowFilters(!showFilters)}
@@ -446,8 +608,9 @@ Idea principal:
           {/* Panel de Filtros Avanzados */}
           {showFilters && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4 shadow-inner animate-in fade-in slide-in-from-top-2">
-              <div className="flex flex-col sm:flex-row gap-4 mb-4">
-                <div className="flex-1">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                {/* Filtro Revista */}
+                <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Filtrar por Revista</label>
                   <select 
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer" 
@@ -457,8 +620,26 @@ Idea principal:
                     {availableJournals.map(j => <option key={j} value={j}>{j}</option>)}
                   </select>
                 </div>
+
+                {/* Filtro Rango Temporal */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Periodo / Año</label>
+                  <select 
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer" 
+                    value={selectedPeriod} 
+                    onChange={(e) => setSelectedPeriod(e.target.value)} 
+                  >
+                    <option value="all">Cualquier fecha</option>
+                    <option value="30d">Últimos 30 días</option>
+                    <option value="2026">Año 2026</option>
+                    <option value="2025">Año 2025</option>
+                    <option value="older">2024 o anteriores</option>
+                  </select>
+                </div>
+
+                {/* Checkbox Open Access */}
                 <div className="flex items-end">
-                  <label className="flex items-center gap-2 cursor-pointer bg-white border border-slate-300 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors h-[38px]">
+                  <label className="flex items-center gap-2 cursor-pointer bg-white border border-slate-300 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors h-[38px] w-full">
                     <input 
                       type="checkbox" 
                       className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
@@ -470,6 +651,7 @@ Idea principal:
                 </div>
               </div>
 
+              {/* Conceptos Clave */}
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1"><Tag size={14}/> Conceptos Clave (Auto-detectados)</label>
@@ -491,13 +673,13 @@ Idea principal:
               </div>
 
               <div className="flex justify-between items-center pt-4 border-t border-slate-200">
-                <button onClick={resetFilters} className="text-sm font-semibold text-slate-500 hover:text-red-600 transition-colors">
+                <button onClick={resetFilters} className="text-sm font-semibold text-slate-500 hover:text-red-600 transition-colors cursor-pointer">
                   Limpiar filtros
                 </button>
                 <button 
                   onClick={handleSaveTab}
                   disabled={activeFiltersCount === 0}
-                  className="flex items-center gap-2 text-sm font-bold px-4 py-2 bg-emerald-800 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center gap-2 text-sm font-bold px-4 py-2 bg-emerald-800 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   title="Guarda esta combinación de filtros como una pestaña nueva"
                 >
                   <Save size={16} /> Guardar como Pestaña
@@ -509,16 +691,16 @@ Idea principal:
           {/* Navegación de Pestañas */}
           {!isLoading && !error && (
             <div className="flex gap-4 border-b border-slate-200 overflow-x-auto text-sm font-bold pt-2 no-scrollbar">
-              <button onClick={() => {resetFilters(); setViewMode('radar');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${viewMode === 'radar' ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              <button onClick={() => {resetFilters(); setViewMode('radar');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'radar' ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <Clock size={16}/> Radar
               </button>
-              <button onClick={() => {resetFilters(); setViewMode('historico');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${viewMode === 'historico' ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              <button onClick={() => {resetFilters(); setViewMode('historico');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'historico' ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <List size={16}/> Todo ({articles.length})
               </button>
-              <button onClick={() => {resetFilters(); setViewMode('biologia');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${viewMode === 'biologia' ? 'border-teal-600 text-teal-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              <button onClick={() => {resetFilters(); setViewMode('biologia');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'biologia' ? 'border-teal-600 text-teal-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <Leaf size={16}/> Biología ({articulosBiologia.length})
               </button>
-              <button onClick={() => {resetFilters(); setViewMode('geologia');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${viewMode === 'geologia' ? 'border-amber-600 text-amber-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              <button onClick={() => {resetFilters(); setViewMode('geologia');}} className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${viewMode === 'geologia' ? 'border-amber-600 text-amber-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <Mountain size={16}/> Geología ({articulosGeologia.length})
               </button>
               
@@ -527,13 +709,13 @@ Idea principal:
                 <div key={tab.id} className="relative group flex items-center">
                   <button 
                     onClick={() => applyCustomTabFilters(tab)} 
-                    className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap pr-6 ${viewMode === `custom_${tab.id}` ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                    className={`pb-3 border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap pr-6 cursor-pointer ${viewMode === `custom_${tab.id}` ? 'border-emerald-600 text-emerald-800' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
                   >
                     <Filter size={14}/> {tab.name}
                   </button>
                   <button 
                     onClick={(e) => {e.stopPropagation(); deleteTab(tab.id);}}
-                    className="absolute right-0 top-0.5 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="absolute right-0 top-0.5 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                     title="Eliminar pestaña"
                   >
                     <X size={14} />
@@ -559,19 +741,26 @@ Idea principal:
             {/* Si hay filtros activos Y NO estamos en una pestaña base, mostramos los resultados filtrados globalmente */}
             {(activeFiltersCount > 0 && !['radar', 'biologia', 'geologia'].includes(viewMode)) || viewMode.startsWith('custom_') ? (
               <div className="space-y-4">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><Filter size={20} className="text-emerald-700"/> Resultados del Filtro ({filteredArticles.length})</h2>
-                </div>
-                {filteredArticles.length > 0 ? filteredArticles.map(a => <ArticleCard key={a.id} article={a}/>) : <div className="p-12 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">No se encontraron publicaciones con esta combinación de filtros.</div>}
+                <ToolbarHeader count={filteredArticles.length} />
+                {filteredArticles.length > 0 ? (
+                  <>
+                    {filteredArticles.slice(0, visibleCount).map(a => <ArticleCard key={a.id} article={a}/>)}
+                    <LoadMoreButton total={filteredArticles.length} />
+                  </>
+                ) : (
+                  <div className="p-12 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">
+                    No se encontraron publicaciones con esta combinación de filtros.
+                  </div>
+                )}
               </div>
             ) : viewMode === 'radar' ? (
               <div className="space-y-10">
                 <section>
-                  <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-slate-800"><Calendar className="text-emerald-700" size={20}/> Novedades de Hoy</h2>
+                  <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-slate-800"><Calendar className="text-emerald-700" size={20}/> Novedades de Hoy ({hoy.length})</h2>
                   {hoy.length ? hoy.map(a => <ArticleCard key={a.id} article={a}/>) : <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">Sin publicaciones registradas en las últimas 24h.</div>}
                 </section>
                 <section>
-                  <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-slate-800"><Clock className="text-slate-500" size={20}/> Esta Semana</h2>
+                  <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-slate-800"><Clock className="text-slate-500" size={20}/> Esta Semana ({semana.length})</h2>
                   {semana.length ? semana.map(a => <ArticleCard key={a.id} article={a}/>) : <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">Sin publicaciones registradas en los últimos 7 días.</div>}
                 </section>
               </div>
@@ -584,7 +773,17 @@ Idea principal:
                     <p className="text-sm text-teal-800 font-medium">Genética, ecología, evolución, botánica, zoología y educación para la sostenibilidad.</p>
                   </div>
                 </div>
-                {articulosBiologia.length > 0 ? articulosBiologia.map(a => <ArticleCard key={a.id} article={a}/>) : <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">No se han detectado artículos con este enfoque en el periodo reciente.</div>}
+                <ToolbarHeader count={articulosBiologia.length} />
+                {articulosBiologia.length > 0 ? (
+                  <>
+                    {articulosBiologia.slice(0, visibleCount).map(a => <ArticleCard key={a.id} article={a}/>)}
+                    <LoadMoreButton total={articulosBiologia.length} />
+                  </>
+                ) : (
+                  <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">
+                    No se han detectado artículos con este enfoque en el periodo seleccionado.
+                  </div>
+                )}
               </div>
             ) : viewMode === 'geologia' ? (
               <div className="space-y-4">
@@ -595,12 +794,23 @@ Idea principal:
                     <p className="text-sm text-amber-800 font-medium">Tectónica, paleontología, mineralogía, procesos geológicos y geociencias.</p>
                   </div>
                 </div>
-                {articulosGeologia.length > 0 ? articulosGeologia.map(a => <ArticleCard key={a.id} article={a}/>) : <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">No se han detectado artículos con este enfoque en el periodo reciente.</div>}
+                <ToolbarHeader count={articulosGeologia.length} />
+                {articulosGeologia.length > 0 ? (
+                  <>
+                    {articulosGeologia.slice(0, visibleCount).map(a => <ArticleCard key={a.id} article={a}/>)}
+                    <LoadMoreButton total={articulosGeologia.length} />
+                  </>
+                ) : (
+                  <div className="p-10 text-center bg-white border border-dashed rounded-xl text-slate-400 font-medium italic">
+                    No se han detectado artículos con este enfoque en el periodo seleccionado.
+                  </div>
+                )}
               </div>
             ) : viewMode === 'historico' ? (
               <div className="space-y-4">
-                <div className="mb-2 pl-1"><h2 className="text-lg font-bold text-slate-800">Listado Completo ({filteredArticles.length})</h2></div>
-                {filteredArticles.map(a => <ArticleCard key={a.id} article={a}/>)}
+                <ToolbarHeader count={filteredArticles.length} />
+                {filteredArticles.slice(0, visibleCount).map(a => <ArticleCard key={a.id} article={a}/>)}
+                <LoadMoreButton total={filteredArticles.length} />
               </div>
             ) : null}
           </div>
@@ -622,7 +832,7 @@ Idea principal:
           <div className="bg-white rounded-3xl max-w-3xl w-full max-h-[85vh] overflow-hidden shadow-2xl flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-emerald-800 text-white">
               <h2 className="text-xl font-bold flex items-center gap-2"><Globe className="w-6 h-6" /> Estado del Radar BioGeo</h2>
-              <button onClick={() => setShowAppInfo(false)} className="p-1 hover:bg-white/20 rounded-full transition-colors"><X className="w-6 h-6" /></button>
+              <button onClick={() => setShowAppInfo(false)} className="p-1 hover:bg-white/20 rounded-full transition-colors cursor-pointer"><X className="w-6 h-6" /></button>
             </div>
             <div className="p-6 overflow-y-auto space-y-6">
               <p className="text-slate-600 leading-relaxed text-base">
@@ -662,15 +872,22 @@ Idea principal:
           <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
             <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-emerald-50">
               <h2 className="text-xl font-bold text-emerald-900 flex items-center gap-2"><Filter size={24}/> Cómo funcionan los filtros</h2>
-              <button onClick={() => setShowFilterInfo(false)} className="p-1 hover:bg-emerald-200 text-emerald-900 rounded-full transition-colors"><X size={20} /></button>
+              <button onClick={() => setShowFilterInfo(false)} className="p-1 hover:bg-emerald-200 text-emerald-900 rounded-full transition-colors cursor-pointer"><X size={20} /></button>
             </div>
             <div className="p-6 space-y-6">
               <div>
-                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Tag className="text-emerald-700" size={18}/> ¿De dónde salen los Conceptos Clave?</h3>
+                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Tag className="text-emerald-700" size={18}/> Conceptos Clave y Resaltado</h3>
                 <p className="text-sm text-slate-600 leading-relaxed">
                   OpenAlex clasifica automáticamente el <i>abstract</i> y título de cada investigación mediante modelos semánticos conectados a ontologías científicas globales.
                   <br/><br/>
-                  El radar analiza las publicaciones recién descargadas y destaca los 25 conceptos más frecuentes para que puedas filtrar con un solo clic.
+                  Además, al escribir cualquier término en el buscador, las palabras encontradas se resaltarán automáticamente en los títulos y resúmenes.
+                </p>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><Award className="text-amber-500" size={18}/> Métrica de Citas</h3>
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Puedes ordenar las publicaciones por número de citas para identificar rápidamente cuáles son los estudios más influyentes o de mayor impacto de cada revista.
                 </p>
               </div>
 
