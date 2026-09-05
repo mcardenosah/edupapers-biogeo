@@ -1,4 +1,4 @@
-// Catálogo de revistas indexadas para EduPapers BioGeo
+// Catálogo de revistas indexadas para EduPapers BioGeo (25 revistas)
 export const JOURNALS = [
   // --- Biología y Ciencias de la Vida ---
   {
@@ -55,6 +55,7 @@ export const JOURNALS = [
     name: "Enseñanza de las Ciencias de la Tierra",
     category: "Geología",
     issns: ["1132-9157", "2385-3484"],
+    sourceIds: ["S4306509504", "S4306509503"],
     scope: "Revista de la AEPECT dedicada a la enseñanza y difusión de la geología."
   },
 
@@ -79,6 +80,13 @@ export const JOURNALS = [
   },
 
   // --- Didáctica General de las Ciencias Experimentales ---
+  {
+    name: "Alambique",
+    category: "Ciencias",
+    issns: ["1133-9837", "2014-4733"],
+    sourceIds: ["S4306501300"],
+    scope: "Revista de referencia (Editorial Graó) sobre didáctica y experiencias de aula en ciencias experimentales."
+  },
   {
     name: "Enseñanza de las Ciencias",
     category: "Ciencias",
@@ -156,3 +164,6 @@ export const JOURNALS = [
 export const ALL_ISSNS = Array.from(
   new Set(JOURNALS.flatMap(j => j.issns))
 ).join('|');
+
+// Fuentes específicas de OpenAlex con metadatos especiales sin ISSN estándar
+export const EXTRA_SOURCE_IDS = "S4306501300|S4306509504";

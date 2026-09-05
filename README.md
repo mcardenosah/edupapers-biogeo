@@ -38,6 +38,7 @@
 - *International Journal of Environmental & Science Education* (IJESE)
 
 ### Didáctica General de las Ciencias Experimentales
+- *Alambique: Didáctica de las Ciencias Experimentales* (Editorial Graó)
 - *Enseñanza de las Ciencias*
 - *Revista Eureka sobre Enseñanza y Divulgación de las Ciencias*
 - *Didáctica de las Ciencias Experimentales y Sociales*

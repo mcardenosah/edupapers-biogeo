@@ -5,7 +5,7 @@ import {
   Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown,
   Trophy, Sparkles, Flame
 } from 'lucide-react';
-import { JOURNALS, ALL_ISSNS } from './config/journals';
+import { JOURNALS, ALL_ISSNS, EXTRA_SOURCE_IDS } from './config/journals';
 
 const CORREO_ADMIN = "tu_correo@ejemplo.com"; 
 
@@ -158,6 +158,13 @@ export default function App() {
           });
         });
 
+        // Incluir revistas con ID directo de OpenAlex (Alambique y E.C. Tierra)
+        fetchPromises.push(
+          fetch(`https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}&sort=publication_date:desc&per-page=200&mailto=${CORREO_ADMIN}`, { cache: 'no-store' })
+            .then(res => res.ok ? res.json() : { results: [] })
+            .catch(() => ({ results: [] }))
+        );
+
         const resultsArray = await Promise.all(fetchPromises);
         const seenIds = new Set();
         let combined = [];
@@ -206,22 +213,52 @@ export default function App() {
     setIsLoadingImpact(true);
     setImpactError(null);
     try {
-      let targetIssns = ALL_ISSNS;
-      if (journal !== "Todas las revistas") {
-        const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
-        if (found && found.issns.length) {
-          targetIssns = found.issns.join('|');
+      const searchQuery = query.trim() ? `&search=${encodeURIComponent(query.trim())}` : '';
+      let worksList = [];
+
+      if (journal === "Alambique") {
+        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306501300${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          worksList = data.results || [];
         }
+      } else if (journal === "Enseñanza de las Ciencias de la Tierra") {
+        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306509504|S4306509503${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          worksList = data.results || [];
+        }
+      } else if (journal !== "Todas las revistas") {
+        const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
+        const targetIssns = (found && found.issns.length) ? found.issns.join('|') : ALL_ISSNS;
+        const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          worksList = data.results || [];
+        }
+      } else {
+        // Todas las revistas: consultamos por ISSNs y por Source IDs combinados
+        const urlIssns = `https://api.openalex.org/works?filter=primary_location.source.issn:${ALL_ISSNS}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
+        const urlSources = `https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}${searchQuery}&sort=cited_by_count:desc&per-page=25&mailto=${CORREO_ADMIN}`;
+        
+        const [resIssns, resSources] = await Promise.all([
+          fetch(urlIssns).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] })),
+          fetch(urlSources).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] }))
+        ]);
+
+        const mergedMap = new Map();
+        [...(resIssns.results || []), ...(resSources.results || [])].forEach(w => {
+          if (w && w.id) mergedMap.set(w.id, w);
+        });
+        worksList = Array.from(mergedMap.values())
+          .sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0))
+          .slice(0, limit);
       }
 
-      const searchQuery = query.trim() ? `&search=${encodeURIComponent(query.trim())}` : '';
-      const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-      
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("Error al consultar artículos más citados.");
-      const data = await res.json();
-
-      const parsed = (data.results || []).map(work => {
+      const parsed = worksList.map(work => {
         const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
         return {
           id: work.id || Math.random().toString(),
