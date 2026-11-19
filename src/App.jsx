@@ -36,7 +36,14 @@ const calcularDiasTranscurridos = (fechaPublicacion) => {
   }
 };
 
-const HighlightText = ({ text, query }) => {
+// OpenAlex incluye trabajos con publication_date posterior a hoy (números programados).
+// Se descartan: daban días transcurridos negativos y aparecían en "Hoy".
+const esFechaFutura = (fechaPublicacion) => {
+  if (!fechaPublicacion) return false;
+  return calcularDiasTranscurridos(fechaPublicacion) < 0;
+};
+
+const HighlightText =({ text, query }) => {
   if (!query || !query.trim() || !text) return <>{text}</>;
   const lowerQuery = query.trim().toLowerCase();
   const strText = String(text);
@@ -172,7 +179,7 @@ export default function App() {
         resultsArray.forEach(data => {
           if (data?.results) {
             data.results.forEach(work => {
-              if (!seenIds.has(work.id)) {
+              if (!seenIds.has(work.id) && !esFechaFutura(work.publication_date)) {
                 seenIds.add(work.id);
                 const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
                 combined.push({
@@ -258,7 +265,7 @@ export default function App() {
           .slice(0, limit);
       }
 
-      const parsed = worksList.map(work => {
+      const parsed = worksList.filter(work => !esFechaFutura(work.publication_date)).map(work => {
         const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
         return {
           id: work.id || Math.random().toString(),
