@@ -5,7 +5,7 @@ import {
   Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown,
   Trophy, Sparkles, Flame, Settings, KeyRound
 } from 'lucide-react';
-import { JOURNALS, ALL_ISSNS, EXTRA_SOURCE_IDS } from './config/journals';
+import { JOURNALS, filtroRevista } from './config/journals';
 
 
 // --- Acceso a OpenAlex ---
@@ -31,11 +31,27 @@ const guardarApiKey = (clave) => {
   }
 };
 
-const fetchOpenAlex = async (url, options) => {
+const esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Reintenta una vez los fallos pasajeros (red, 429 por ráfaga, 5xx). Un 401 no se reintenta.
+const fetchOpenAlex = async (url, options, reintentos = 1) => {
   const clave = leerApiKey();
   const urlFinal = clave ? `${url}&api_key=${encodeURIComponent(clave)}` : url;
-  const res = await fetch(urlFinal, options);
+  let res;
+  try {
+    res = await fetch(urlFinal, options);
+  } catch (errRed) {
+    if (reintentos > 0) {
+      await esperar(1000);
+      return fetchOpenAlex(url, options, reintentos - 1);
+    }
+    throw errRed;
+  }
   if (!res.ok) {
+    if (reintentos > 0 && (res.status === 429 || res.status >= 500)) {
+      await esperar(1000);
+      return fetchOpenAlex(url, options, reintentos - 1);
+    }
     const err = new Error(`OpenAlex respondió ${res.status}`);
     err.status = res.status;
     throw err;
@@ -43,11 +59,50 @@ const fetchOpenAlex = async (url, options) => {
   return res.json();
 };
 
-// Para peticiones secundarias: si fallan se ignoran, salvo si la API key es inválida.
-const vacioSalvoClaveInvalida = (err) => {
-  if (err?.status === 401) throw err;
-  return { results: [] };
+// --- Una petición por revista ---
+// OpenAlex respeta los OR largos de ISSN, pero al agrupar revistas y ordenar por fecha (o
+// por citas) las de más volumen se quedaban todo el cupo y las pequeñas no salían.
+// Ahora cada revista tiene su propia petición y su propio cupo.
+const RADAR_POR_REVISTA = 50;
+const PETICIONES_SIMULTANEAS = 5; // evita ráfagas que OpenAlex corta con 429
+
+// Como Promise.allSettled, pero con un máximo de tareas en marcha a la vez.
+const enParalelo = async (tareas, limite = PETICIONES_SIMULTANEAS) => {
+  const resultados = new Array(tareas.length);
+  let siguiente = 0;
+  const trabajador = async () => {
+    while (siguiente < tareas.length) {
+      const i = siguiente++;
+      try {
+        resultados[i] = { status: 'fulfilled', value: await tareas[i]() };
+      } catch (reason) {
+        resultados[i] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limite, tareas.length) }, trabajador));
+  return resultados;
 };
+
+// Lanza error si la clave es inválida o si fallan todas; si fallan algunas, las devuelve
+// en revistasFallidas para avisar sin perder el resto.
+const pedirPorRevista = async (revistas, parametros, options) => {
+  const resultados = await enParalelo(revistas.map(j => () =>
+    fetchOpenAlex(`https://api.openalex.org/works?filter=${filtroRevista(j)}${parametros}`, options)
+  ));
+  const fallos = resultados.filter(r => r.status === 'rejected');
+  const claveInvalida = fallos.find(r => r.reason?.status === 401);
+  if (claveInvalida) throw claveInvalida.reason;
+  if (fallos.length > 0 && fallos.length === resultados.length) throw fallos[0].reason;
+  return {
+    works: resultados.flatMap(r => (r.status === 'fulfilled' ? r.value.results || [] : [])),
+    revistasFallidas: revistas.filter((_, i) => resultados[i].status === 'rejected').map(j => j.name)
+  };
+};
+
+const avisoRevistasFallidas = (nombres) => nombres.length
+  ? `No se ha podido consultar ${nombres.length === 1 ? 'la revista' : `${nombres.length} revistas`}: ${nombres.join(', ')}. El resto se muestra con normalidad.`
+  : null;
 
 const mensajeErrorOpenAlex = (err, porDefecto) => {
   if (err?.status === 401) return "La API key de OpenAlex no es válida. Revísala o bórrala en Ajustes.";
@@ -117,7 +172,15 @@ const esFechaFutura = (fechaPublicacion) => {
   return calcularDiasTranscurridos(fechaPublicacion) < 0;
 };
 
-const HighlightText =({ text, query }) => {
+// Aviso ámbar cuando alguna revista no ha respondido pero el resto sí.
+const AvisoParcial = ({ texto }) => (
+  <div className="mb-4 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+    <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+    {texto}
+  </div>
+);
+
+const HighlightText = ({ text, query }) => {
   if (!query || !query.trim() || !text) return <>{text}</>;
   const lowerQuery = query.trim().toLowerCase();
   const strText = String(text);
@@ -186,6 +249,7 @@ export default function App() {
   const [articles, setArticles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [radarAviso, setRadarAviso] = useState(null);
   
   // Modales de Información
   const [showAppInfo, setShowAppInfo] = useState(false);
@@ -213,6 +277,7 @@ export default function App() {
   const [impactArticles, setImpactArticles] = useState([]);
   const [isLoadingImpact, setIsLoadingImpact] = useState(false);
   const [impactError, setImpactError] = useState(null);
+  const [impactAviso, setImpactAviso] = useState(null);
   const [impactSearchInput, setImpactSearchInput] = useState("");
   const [impactActiveQuery, setImpactActiveQuery] = useState("");
   const [impactSelectedJournal, setImpactSelectedJournal] = useState("Todas las revistas");
@@ -233,53 +298,36 @@ export default function App() {
       setIsLoading(true);
       setError(null);
       try {
-        const issnArray = ALL_ISSNS.split('|');
-        const chunkSize = 40;
-        const issnChunks = [];
-        for (let i = 0; i < issnArray.length; i += chunkSize) {
-          issnChunks.push(issnArray.slice(i, i + chunkSize).join('|'));
-        }
-
-        const fetchPromises = issnChunks.map(chunk => {
-          const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${chunk}&sort=publication_date:desc&per-page=200`;
-          return fetchOpenAlex(url, { cache: 'no-store' });
-        });
-
-        // Incluir revistas con ID directo de OpenAlex (Alambique y E.C. Tierra)
-        fetchPromises.push(
-          fetchOpenAlex(`https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}&sort=publication_date:desc&per-page=200`, { cache: 'no-store' })
-            .catch(vacioSalvoClaveInvalida)
+        const { works, revistasFallidas } = await pedirPorRevista(
+          JOURNALS,
+          `&sort=publication_date:desc&per-page=${RADAR_POR_REVISTA}`,
+          { cache: 'no-store' }
         );
-
-        const resultsArray = await Promise.all(fetchPromises);
+        setRadarAviso(avisoRevistasFallidas(revistasFallidas));
         const seenIds = new Set();
         let combined = [];
 
-        resultsArray.forEach(data => {
-          if (data?.results) {
-            data.results.forEach(work => {
-              if (!seenIds.has(work.id) && !esFechaFutura(work.publication_date)) {
-                seenIds.add(work.id);
-                const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
-                combined.push({
-                  id: work.id || Math.random().toString(),
-                  title: work.title || "Título no disponible",
-                  authors: work.authorships?.length > 0 
-                    ? work.authorships.map(a => a.author?.display_name).filter(Boolean) 
-                    : ["Autores desconocidos"],
-                  journal: work.primary_location?.source?.display_name || "Revista Científica",
-                  year: work.publication_year || "Año desconocido",
-                  date: work.publication_date || "",
-                  isOpenAccess: work.open_access?.is_oa || false,
-                  pdfUrl: pdfUrl,
-                  citedBy: work.cited_by_count || 0,
-                  doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
-                  url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
-                  abstract: reconstruirAbstract(work.abstract_inverted_index),
-                  tags: extraerTags(work),
-                  diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
-                });
-              }
+        works.forEach(work => {
+          if (!seenIds.has(work.id) && !esFechaFutura(work.publication_date)) {
+            seenIds.add(work.id);
+            const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
+            combined.push({
+              id: work.id || Math.random().toString(),
+              title: work.title || "Título no disponible",
+              authors: work.authorships?.length > 0 
+                ? work.authorships.map(a => a.author?.display_name).filter(Boolean) 
+                : ["Autores desconocidos"],
+              journal: work.primary_location?.source?.display_name || "Revista Científica",
+              year: work.publication_year || "Año desconocido",
+              date: work.publication_date || "",
+              isOpenAccess: work.open_access?.is_oa || false,
+              pdfUrl: pdfUrl,
+              citedBy: work.cited_by_count || 0,
+              doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
+              url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
+              abstract: reconstruirAbstract(work.abstract_inverted_index),
+              tags: extraerTags(work),
+              diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
             });
           }
         });
@@ -301,40 +349,24 @@ export default function App() {
     setImpactError(null);
     try {
       const searchQuery = query.trim() ? `&search=${encodeURIComponent(query.trim())}` : '';
-      let worksList = [];
+      // "Todas las revistas": una petición por revista con el mismo cupo (limit), porque el
+      // top global podría salir entero de una sola revista. Luego se mezcla y se recorta.
+      const revistas = journal === "Todas las revistas"
+        ? JOURNALS
+        : JOURNALS.filter(j => j.name.toLowerCase() === journal.toLowerCase());
+      const { works, revistasFallidas } = await pedirPorRevista(
+        revistas,
+        `${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`
+      );
+      setImpactAviso(avisoRevistasFallidas(revistasFallidas));
 
-      if (journal === "Alambique") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306501300${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
-        const data = await fetchOpenAlex(url);
-        worksList = data.results || [];
-      } else if (journal === "Enseñanza de las Ciencias de la Tierra") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306509504|S4306509503${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
-        const data = await fetchOpenAlex(url);
-        worksList = data.results || [];
-      } else if (journal !== "Todas las revistas") {
-        const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
-        const targetIssns = (found && found.issns.length) ? found.issns.join('|') : ALL_ISSNS;
-        const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
-        const data = await fetchOpenAlex(url);
-        worksList = data.results || [];
-      } else {
-        // Todas las revistas: consultamos por ISSNs y por Source IDs combinados
-        const urlIssns = `https://api.openalex.org/works?filter=primary_location.source.issn:${ALL_ISSNS}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
-        const urlSources = `https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}${searchQuery}&sort=cited_by_count:desc&per-page=25`;
-        
-        const [resIssns, resSources] = await Promise.all([
-          fetchOpenAlex(urlIssns).catch(vacioSalvoClaveInvalida),
-          fetchOpenAlex(urlSources).catch(vacioSalvoClaveInvalida)
-        ]);
-
-        const mergedMap = new Map();
-        [...(resIssns.results || []), ...(resSources.results || [])].forEach(w => {
-          if (w && w.id) mergedMap.set(w.id, w);
-        });
-        worksList = Array.from(mergedMap.values())
-          .sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0))
-          .slice(0, limit);
-      }
+      const mergedMap = new Map();
+      works.forEach(w => {
+        if (w && w.id) mergedMap.set(w.id, w);
+      });
+      const worksList = Array.from(mergedMap.values())
+        .sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0))
+        .slice(0, limit);
 
       const parsed = worksList.filter(work => !esFechaFutura(work.publication_date)).map(work => {
         const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
@@ -1115,6 +1147,7 @@ Idea principal:
               <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex gap-4"><AlertCircle/><p className="font-medium">{impactError}</p></div>
             ) : (
               <div>
+                {impactAviso && <AvisoParcial texto={impactAviso} />}
                 <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200">
                   <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
                     <Trophy size={16} className="text-amber-500" />
@@ -1145,6 +1178,7 @@ Idea principal:
           </div>
         ) : (
           <div>
+            {radarAviso && <AvisoParcial texto={radarAviso} />}
             {/^alambique/i.test(selectedJournal) && (
               <div className="mb-4 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
                 <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
