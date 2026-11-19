@@ -91,7 +91,7 @@ const reconstruirAbstract = (invertedIndex) => {
       positions.forEach(pos => words[pos] = word);
     });
     return words.filter(Boolean).join(" ");
-  } catch (e) {
+  } catch {
     return "Error al procesar el resumen original.";
   }
 };
@@ -105,7 +105,7 @@ const calcularDiasTranscurridos = (fechaPublicacion) => {
     const fechaPub = new Date(year, month - 1, day);
     const diferenciaTiempo = fechaHoy.getTime() - fechaPub.getTime();
     return Math.floor(diferenciaTiempo / (1000 * 3600 * 24));
-  } catch (e) {
+  } catch {
     return 999;
   }
 };
@@ -551,7 +551,9 @@ export default function App() {
     el.value = text;
     document.body.appendChild(el);
     el.select();
-    try { document.execCommand('copy'); setTranslateFeedback(platform); setTimeout(() => setTranslateFeedback(null), 4000); } catch (err) {}
+    try { document.execCommand('copy'); setTranslateFeedback(platform); setTimeout(() => setTranslateFeedback(null), 4000); } catch {
+      // Si el navegador bloquea la copia, se abre igualmente el traductor.
+    }
     document.body.removeChild(el);
 
     const url = platform === 'deepl' 
