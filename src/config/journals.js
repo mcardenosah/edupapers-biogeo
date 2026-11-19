@@ -85,6 +85,8 @@ export const JOURNALS = [
     category: "Ciencias",
     issns: ["1133-9837", "2014-4733"],
     sourceIds: ["S4306501300"],
+    // OpenAlex solo tiene indexados los números de 2016 a 2021 (comprobado en nov-2026).
+    coverageNote: "OpenAlex solo tiene datos de Alambique hasta 2021: no aparecerán sus números recientes.",
     scope: "Revista de referencia (Editorial Graó) sobre didáctica y experiencias de aula en ciencias experimentales."
   },
   {

@@ -1076,6 +1076,13 @@ Idea principal:
                 </div>
               </div>
 
+              {JOURNALS.find(j => j.name === impactSelectedJournal)?.coverageNote && (
+                <div className="mt-3 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+                  <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+                  {JOURNALS.find(j => j.name === impactSelectedJournal).coverageNote}
+                </div>
+              )}
+
               {/* Chips Temáticos Rápidos */}
               <div className="mt-4 pt-3 border-t border-amber-200/60">
                 <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
@@ -1136,6 +1143,12 @@ Idea principal:
           </div>
         ) : (
           <div>
+            {/^alambique/i.test(selectedJournal) && (
+              <div className="mb-4 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+                <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+                {JOURNALS.find(j => j.name === "Alambique")?.coverageNote}
+              </div>
+            )}
             {/* Si hay filtros activos Y NO estamos en una pestaña base, mostramos los resultados filtrados globalmente */}
             {(activeFiltersCount > 0 && !['radar', 'biologia', 'geologia'].includes(viewMode)) || viewMode.startsWith('custom_') ? (
               <div className="space-y-4">
@@ -1250,7 +1263,12 @@ Idea principal:
                       <ul className="text-sm text-slate-700 space-y-1.5 pl-2 border-l-2 border-emerald-200">
                         {JOURNALS.filter(j => j.category === cat).map(rev => (
                           <li key={rev.name} className="flex items-start justify-between gap-2">
-                            <span className="font-medium">{rev.name}</span>
+                            <span className="font-medium">
+                              {rev.name}
+                              {rev.coverageNote && (
+                                <span className="block text-[11px] font-semibold text-amber-700">{rev.coverageNote}</span>
+                              )}
+                            </span>
                             <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{rev.issns[0]}</span>
                           </li>
                         ))}
