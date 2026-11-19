@@ -3,11 +3,57 @@ import {
   Search, ArrowLeft, ExternalLink, Unlock, FileText, CheckCircle2, 
   Copy, Filter, AlertCircle, Calendar, Clock, List, Leaf, Mountain, Dna, Loader2, 
   Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown,
-  Trophy, Sparkles, Flame
+  Trophy, Sparkles, Flame, Settings, KeyRound
 } from 'lucide-react';
 import { JOURNALS, ALL_ISSNS, EXTRA_SOURCE_IDS } from './config/journals';
 
-const CORREO_ADMIN = "tu_correo@ejemplo.com"; 
+
+// --- Acceso a OpenAlex ---
+// Desde feb-2026 OpenAlex identifica a los clientes con API key (gratuita) en lugar de mailto.
+// La clave es opcional, la introduce cada usuario en Ajustes y solo vive en su localStorage.
+const API_KEY_STORAGE = 'eduradar_biogeo_openalex_api_key';
+
+const leerApiKey = () => {
+  try {
+    return (localStorage.getItem(API_KEY_STORAGE) || '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const guardarApiKey = (clave) => {
+  try {
+    if (clave) localStorage.setItem(API_KEY_STORAGE, clave);
+    else localStorage.removeItem(API_KEY_STORAGE);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const fetchOpenAlex = async (url, options) => {
+  const clave = leerApiKey();
+  const urlFinal = clave ? `${url}&api_key=${encodeURIComponent(clave)}` : url;
+  const res = await fetch(urlFinal, options);
+  if (!res.ok) {
+    const err = new Error(`OpenAlex respondió ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+};
+
+// Para peticiones secundarias: si fallan se ignoran, salvo si la API key es inválida.
+const vacioSalvoClaveInvalida = (err) => {
+  if (err?.status === 401) throw err;
+  return { results: [] };
+};
+
+const mensajeErrorOpenAlex = (err, porDefecto) => {
+  if (err?.status === 401) return "La API key de OpenAlex no es válida. Revísala o bórrala en Ajustes.";
+  if (err?.status === 429) return "Se ha agotado el cupo diario gratuito de OpenAlex. Añade tu API key en Ajustes o inténtalo más tarde.";
+  return porDefecto;
+};
 
 const reconstruirAbstract = (invertedIndex) => {
   if (!invertedIndex) return "Resumen original no disponible en la base de datos abierta.";
@@ -110,6 +156,12 @@ export default function App() {
   // Modales de Información
   const [showAppInfo, setShowAppInfo] = useState(false);
   const [showFilterInfo, setShowFilterInfo] = useState(false);
+
+  // Ajustes: API key opcional de OpenAlex (solo en localStorage del navegador)
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState(leerApiKey);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [settingsFeedback, setSettingsFeedback] = useState(null);
   
   // Estados de Filtros de Novedades
   const [searchTerm, setSearchTerm] = useState("");
@@ -158,18 +210,14 @@ export default function App() {
         }
 
         const fetchPromises = issnChunks.map(chunk => {
-          const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${chunk}&sort=publication_date:desc&per-page=200&mailto=${CORREO_ADMIN}`;
-          return fetch(url, { cache: 'no-store' }).then(res => {
-            if (!res.ok) throw new Error("Error API OpenAlex");
-            return res.json();
-          });
+          const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${chunk}&sort=publication_date:desc&per-page=200`;
+          return fetchOpenAlex(url, { cache: 'no-store' });
         });
 
         // Incluir revistas con ID directo de OpenAlex (Alambique y E.C. Tierra)
         fetchPromises.push(
-          fetch(`https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}&sort=publication_date:desc&per-page=200&mailto=${CORREO_ADMIN}`, { cache: 'no-store' })
-            .then(res => res.ok ? res.json() : { results: [] })
-            .catch(() => ({ results: [] }))
+          fetchOpenAlex(`https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}&sort=publication_date:desc&per-page=200`, { cache: 'no-store' })
+            .catch(vacioSalvoClaveInvalida)
         );
 
         const resultsArray = await Promise.all(fetchPromises);
@@ -207,13 +255,13 @@ export default function App() {
         combined.sort((a, b) => new Date(b.date) - new Date(a.date));
         setArticles(combined);
       } catch (err) {
-        setError("Error de conexión. Verifica tu acceso a internet.");
+        setError(mensajeErrorOpenAlex(err, "Error de conexión. Verifica tu acceso a internet."));
       } finally {
         setIsLoading(false);
       }
     };
     fetchArticles();
-  }, []);
+  }, [apiKey]);
 
   // Función para buscar en el Explorador de Impacto / Más Citados
   const fetchImpactArticles = useCallback(async (query = "", journal = "Todas las revistas", limit = 50) => {
@@ -224,36 +272,27 @@ export default function App() {
       let worksList = [];
 
       if (journal === "Alambique") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306501300${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
+        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306501300${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
+        const data = await fetchOpenAlex(url);
+        worksList = data.results || [];
       } else if (journal === "Enseñanza de las Ciencias de la Tierra") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306509504|S4306509503${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
+        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306509504|S4306509503${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
+        const data = await fetchOpenAlex(url);
+        worksList = data.results || [];
       } else if (journal !== "Todas las revistas") {
         const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
         const targetIssns = (found && found.issns.length) ? found.issns.join('|') : ALL_ISSNS;
-        const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
+        const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
+        const data = await fetchOpenAlex(url);
+        worksList = data.results || [];
       } else {
         // Todas las revistas: consultamos por ISSNs y por Source IDs combinados
-        const urlIssns = `https://api.openalex.org/works?filter=primary_location.source.issn:${ALL_ISSNS}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const urlSources = `https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}${searchQuery}&sort=cited_by_count:desc&per-page=25&mailto=${CORREO_ADMIN}`;
+        const urlIssns = `https://api.openalex.org/works?filter=primary_location.source.issn:${ALL_ISSNS}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`;
+        const urlSources = `https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}${searchQuery}&sort=cited_by_count:desc&per-page=25`;
         
         const [resIssns, resSources] = await Promise.all([
-          fetch(urlIssns).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] })),
-          fetch(urlSources).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] }))
+          fetchOpenAlex(urlIssns).catch(vacioSalvoClaveInvalida),
+          fetchOpenAlex(urlSources).catch(vacioSalvoClaveInvalida)
         ]);
 
         const mergedMap = new Map();
@@ -289,7 +328,7 @@ export default function App() {
       setImpactArticles(parsed);
       setHasFetchedImpactOnce(true);
     } catch (err) {
-      setImpactError("No se pudieron cargar los artículos más citados. Comprueba tu conexión.");
+      setImpactError(mensajeErrorOpenAlex(err, "No se pudieron cargar los artículos más citados. Comprueba tu conexión."));
     } finally {
       setIsLoadingImpact(false);
     }
@@ -301,6 +340,26 @@ export default function App() {
       fetchImpactArticles("", impactSelectedJournal, impactLimit);
     }
   }, [viewMode, hasFetchedImpactOnce, impactSelectedJournal, impactLimit, fetchImpactArticles]);
+
+  const openSettings = () => {
+    setApiKeyDraft(apiKey);
+    setSettingsFeedback(null);
+    setShowSettings(true);
+  };
+
+  const handleSaveApiKey = (e) => {
+    if (e) e.preventDefault();
+    const clave = apiKeyDraft.trim();
+    if (!guardarApiKey(clave)) {
+      setSettingsFeedback("Tu navegador no permite guardar datos locales; la clave no se ha guardado.");
+      return;
+    }
+    setShowSettings(false);
+    if (clave !== apiKey) {
+      setApiKey(clave);
+      setHasFetchedImpactOnce(false);
+    }
+  };
 
   const handleImpactSearchSubmit = (e) => {
     if (e) e.preventDefault();
@@ -720,6 +779,14 @@ Idea principal:
                 </h1>
                 <p className="text-xs text-slate-500 font-medium">Radar de Didáctica de la Biología y la Geología</p>
               </div>
+              <button
+                onClick={openSettings}
+                className="ml-auto md:ml-2 p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-full transition-colors cursor-pointer"
+                title="Ajustes (API key de OpenAlex)"
+                aria-label="Ajustes"
+              >
+                <Settings size={18} />
+              </button>
             </div>
             
             {/* Buscador para vistas de Novedades */}
@@ -1148,6 +1215,43 @@ Idea principal:
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: AJUSTES (API KEY DE OPENALEX) */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" onClick={() => setShowSettings(false)}>
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-emerald-50">
+              <h2 className="text-xl font-bold text-emerald-900 flex items-center gap-2"><Settings size={22}/> Ajustes</h2>
+              <button onClick={() => setShowSettings(false)} className="p-1 hover:bg-emerald-200 text-emerald-900 rounded-full transition-colors cursor-pointer"><X size={20} /></button>
+            </div>
+            <form onSubmit={handleSaveApiKey} className="p-6 space-y-4">
+              <label htmlFor="openalex-api-key" className="block text-sm font-bold text-slate-700 flex items-center gap-2">
+                <KeyRound size={16} className="text-emerald-700"/> API key de OpenAlex (opcional)
+              </label>
+              <input
+                id="openalex-api-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={apiKeyDraft}
+                onChange={e => setApiKeyDraft(e.target.value)}
+                placeholder="Pega aquí tu clave gratuita"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+              />
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Sin clave, la app usa el cupo diario gratuito compartido por tu red. Con tu propia clave tienes un cupo propio.
+                Consíguela en <a href="https://openalex.org/settings/api" target="_blank" rel="noopener noreferrer" className="text-emerald-700 font-bold hover:underline">openalex.org</a>.
+                Se guarda solo en este navegador; déjala vacía para borrarla.
+              </p>
+              {settingsFeedback && <p className="text-xs font-semibold text-red-700">{settingsFeedback}</p>}
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setShowSettings(false)} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer">Cancelar</button>
+                <button type="submit" className="px-4 py-2 text-sm font-bold bg-emerald-800 text-white rounded-lg hover:bg-emerald-700 cursor-pointer">Guardar</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
