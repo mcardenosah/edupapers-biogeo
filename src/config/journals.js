@@ -85,6 +85,8 @@ export const JOURNALS = [
     category: "Ciencias",
     issns: ["1133-9837", "2014-4733"],
     sourceIds: ["S4306501300"],
+    // OpenAlex solo tiene indexados los números de 2016 a 2021 (comprobado en nov-2026).
+    coverageNote: "OpenAlex solo tiene datos de Alambique hasta 2021: no aparecerán sus números recientes.",
     scope: "Revista de referencia (Editorial Graó) sobre didáctica y experiencias de aula en ciencias experimentales."
   },
   {
@@ -161,9 +163,9 @@ export const JOURNALS = [
   }
 ];
 
-export const ALL_ISSNS = Array.from(
-  new Set(JOURNALS.flatMap(j => j.issns))
-).join('|');
-
-// Fuentes específicas de OpenAlex con metadatos especiales sin ISSN estándar
-export const EXTRA_SOURCE_IDS = "S4306501300|S4306509504";
+// Filtro de OpenAlex para una revista. Si tiene sourceIds se usan ellos: en OpenAlex
+// Alambique no tiene trabajos asociados a su ISSN y Enseñanza de las Ciencias de la Tierra
+// tiene 85 por ISSN frente a 1007 por source ID (comprobado en nov-2026).
+export const filtroRevista = (journal) => journal.sourceIds?.length
+  ? `primary_location.source.id:${journal.sourceIds.join('|')}`
+  : `primary_location.source.issn:${journal.issns.join('|')}`;

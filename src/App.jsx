@@ -3,11 +3,140 @@ import {
   Search, ArrowLeft, ExternalLink, Unlock, FileText, CheckCircle2, 
   Copy, Filter, AlertCircle, Calendar, Clock, List, Leaf, Mountain, Dna, Loader2, 
   Languages, Tag, X, Save, Info, Globe, HelpCircle, Award, Download, ArrowUpDown, ChevronDown,
-  Trophy, Sparkles, Flame
+  Trophy, Sparkles, Flame, Settings, KeyRound
 } from 'lucide-react';
-import { JOURNALS, ALL_ISSNS, EXTRA_SOURCE_IDS } from './config/journals';
+import { JOURNALS, filtroRevista } from './config/journals';
 
-const CORREO_ADMIN = "tu_correo@ejemplo.com"; 
+
+// --- Acceso a OpenAlex ---
+// Desde feb-2026 OpenAlex identifica a los clientes con API key (gratuita) en lugar de mailto.
+// La clave es opcional, la introduce cada usuario en Ajustes y solo vive en su localStorage.
+const API_KEY_STORAGE = 'eduradar_biogeo_openalex_api_key';
+
+const leerApiKey = () => {
+  try {
+    return (localStorage.getItem(API_KEY_STORAGE) || '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const guardarApiKey = (clave) => {
+  try {
+    if (clave) localStorage.setItem(API_KEY_STORAGE, clave);
+    else localStorage.removeItem(API_KEY_STORAGE);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Reintenta una vez los fallos pasajeros (red, 429 por ráfaga, 5xx). Un 401 no se reintenta.
+const fetchOpenAlex = async (url, options, reintentos = 1) => {
+  const clave = leerApiKey();
+  const urlFinal = clave ? `${url}&api_key=${encodeURIComponent(clave)}` : url;
+  let res;
+  try {
+    res = await fetch(urlFinal, options);
+  } catch (errRed) {
+    if (reintentos > 0) {
+      await esperar(1000);
+      return fetchOpenAlex(url, options, reintentos - 1);
+    }
+    throw errRed;
+  }
+  if (!res.ok) {
+    if (reintentos > 0 && (res.status === 429 || res.status >= 500)) {
+      await esperar(1000);
+      return fetchOpenAlex(url, options, reintentos - 1);
+    }
+    const err = new Error(`OpenAlex respondió ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+};
+
+// --- Una petición por revista ---
+// OpenAlex respeta los OR largos de ISSN, pero al agrupar revistas y ordenar por fecha (o
+// por citas) las de más volumen se quedaban todo el cupo y las pequeñas no salían.
+// Ahora cada revista tiene su propia petición y su propio cupo.
+const RADAR_POR_REVISTA = 50;
+const PETICIONES_SIMULTANEAS = 5; // evita ráfagas que OpenAlex corta con 429
+
+// Como Promise.allSettled, pero con un máximo de tareas en marcha a la vez.
+const enParalelo = async (tareas, limite = PETICIONES_SIMULTANEAS) => {
+  const resultados = new Array(tareas.length);
+  let siguiente = 0;
+  const trabajador = async () => {
+    while (siguiente < tareas.length) {
+      const i = siguiente++;
+      try {
+        resultados[i] = { status: 'fulfilled', value: await tareas[i]() };
+      } catch (reason) {
+        resultados[i] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limite, tareas.length) }, trabajador));
+  return resultados;
+};
+
+// Lanza error si la clave es inválida o si fallan todas; si fallan algunas, las devuelve
+// en revistasFallidas para avisar sin perder el resto.
+const pedirPorRevista = async (revistas, parametros, options) => {
+  const resultados = await enParalelo(revistas.map(j => () =>
+    fetchOpenAlex(`https://api.openalex.org/works?filter=${filtroRevista(j)}${parametros}`, options)
+  ));
+  const fallos = resultados.filter(r => r.status === 'rejected');
+  const claveInvalida = fallos.find(r => r.reason?.status === 401);
+  if (claveInvalida) throw claveInvalida.reason;
+  if (fallos.length > 0 && fallos.length === resultados.length) throw fallos[0].reason;
+  return {
+    works: resultados.flatMap(r => (r.status === 'fulfilled' ? r.value.results || [] : [])),
+    revistasFallidas: revistas.filter((_, i) => resultados[i].status === 'rejected').map(j => j.name)
+  };
+};
+
+const avisoRevistasFallidas = (nombres) => nombres.length
+  ? `No se ha podido consultar ${nombres.length === 1 ? 'la revista' : `${nombres.length} revistas`}: ${nombres.join(', ')}. El resto se muestra con normalidad.`
+  : null;
+
+const mensajeErrorOpenAlex = (err, porDefecto) => {
+  if (err?.status === 401) return "La API key de OpenAlex no es válida. Revísala o bórrala en Ajustes.";
+  if (err?.status === 429) return "Se ha agotado el cupo diario gratuito de OpenAlex. Añade tu API key en Ajustes o inténtalo más tarde.";
+  return porDefecto;
+};
+
+// Etiquetas de un trabajo: topics (clasificación actual de OpenAlex) y keywords.
+// Sustituye a concepts, que OpenAlex ha dejado obsoleto.
+const extraerTags = (work) => {
+  const topics = (work.topics || []).slice(0, 3).map(t => t.display_name);
+  const keywords = (work.keywords || []).slice(0, 3).map(k => k.display_name);
+  return Array.from(new Set([...topics, ...keywords].filter(Boolean)));
+};
+
+// --- Pestañas personalizadas en localStorage (puede fallar en modo privado o con datos bloqueados) ---
+const CUSTOM_TABS_STORAGE = 'eduradar_biogeo_custom_tabs';
+
+const leerPestanas = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_TABS_STORAGE) || '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+};
+
+const guardarPestanas = (tabs) => {
+  try {
+    localStorage.setItem(CUSTOM_TABS_STORAGE, JSON.stringify(tabs));
+  } catch {
+    // Sin almacenamiento: las pestañas solo duran hasta recargar la página.
+  }
+};
 
 const reconstruirAbstract = (invertedIndex) => {
   if (!invertedIndex) return "Resumen original no disponible en la base de datos abierta.";
@@ -17,7 +146,7 @@ const reconstruirAbstract = (invertedIndex) => {
       positions.forEach(pos => words[pos] = word);
     });
     return words.filter(Boolean).join(" ");
-  } catch (e) {
+  } catch {
     return "Error al procesar el resumen original.";
   }
 };
@@ -31,10 +160,25 @@ const calcularDiasTranscurridos = (fechaPublicacion) => {
     const fechaPub = new Date(year, month - 1, day);
     const diferenciaTiempo = fechaHoy.getTime() - fechaPub.getTime();
     return Math.floor(diferenciaTiempo / (1000 * 3600 * 24));
-  } catch (e) {
+  } catch {
     return 999;
   }
 };
+
+// OpenAlex incluye trabajos con publication_date posterior a hoy (números programados).
+// Se descartan: daban días transcurridos negativos y aparecían en "Hoy".
+const esFechaFutura = (fechaPublicacion) => {
+  if (!fechaPublicacion) return false;
+  return calcularDiasTranscurridos(fechaPublicacion) < 0;
+};
+
+// Aviso ámbar cuando alguna revista no ha respondido pero el resto sí.
+const AvisoParcial = ({ texto }) => (
+  <div className="mb-4 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+    <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+    {texto}
+  </div>
+);
 
 const HighlightText = ({ text, query }) => {
   if (!query || !query.trim() || !text) return <>{text}</>;
@@ -76,14 +220,20 @@ const BIOLOGIA_KEYWORDS = [
   'fisiología', 'organism', 'nature-based', 'living organisms'
 ];
 
+// Con límites de palabra para evitar falsos positivos ("rock" en "rocket", "mineral" en
+// "mineralization" de un artículo de nutrición...). Se usa un límite Unicode en vez de \b
+// porque \b de JavaScript trata las letras acentuadas como separadores.
 const GEOLOGIA_KEYWORDS = [
-  '\\bgeology\\b', '\\bgeología\\b', 'earth science', 'ciencias de la tierra', 
-  'geoscience', 'geociencias', 'tectonics', 'tectónica', 'plate tectonics', 
-  'paleontology', 'paleontología', 'mineral', 'minerales', 'rock', 'rocas', 
-  'volcano', 'volcanes', 'volcanism', 'earthquake', 'terremoto', 'sismicidad', 
-  'seismic', 'geosphere', 'geosfera', 'fossil', 'fósiles', 'hydrogeology', 
-  'stratigraphy', 'estratigrafía', 'sediment', 'geomorfología', 'geomorphology'
+  'geology', 'geología', 'earth sciences?', 'ciencias de la tierra',
+  'geosciences?', 'geociencias', 'tectonics', 'tectónicas?', 'plate tectonics',
+  'paleontology', 'paleontología', 'minerals?', 'minerales', 'rocks?', 'rocas?',
+  'volcano(?:es|s)?', 'volcán', 'volcanes', 'volcanism', 'volcanismo', 'earthquakes?', 'terremotos?',
+  'sismicidad', 'seismic', 'geosphere', 'geosfera', 'fossils?', 'fósil', 'fósiles', 'hydrogeology',
+  'stratigraphy', 'estratigrafía', 'sediments?', 'sedimentos?', 'geomorfología', 'geomorphology'
 ];
+const GEOLOGIA_REGEX = new RegExp(`(?<![\\p{L}\\p{N}])(?:${GEOLOGIA_KEYWORDS.join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+
+const ANIO_ACTUAL = new Date().getFullYear();
 
 const QUICK_SEARCH_TOPICS = [
   { label: 'Evolución y Selección Natural', query: 'evolution natural selection' },
@@ -99,10 +249,17 @@ export default function App() {
   const [articles, setArticles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [radarAviso, setRadarAviso] = useState(null);
   
   // Modales de Información
   const [showAppInfo, setShowAppInfo] = useState(false);
   const [showFilterInfo, setShowFilterInfo] = useState(false);
+
+  // Ajustes: API key opcional de OpenAlex (solo en localStorage del navegador)
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState(leerApiKey);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [settingsFeedback, setSettingsFeedback] = useState(null);
   
   // Estados de Filtros de Novedades
   const [searchTerm, setSearchTerm] = useState("");
@@ -120,6 +277,7 @@ export default function App() {
   const [impactArticles, setImpactArticles] = useState([]);
   const [isLoadingImpact, setIsLoadingImpact] = useState(false);
   const [impactError, setImpactError] = useState(null);
+  const [impactAviso, setImpactAviso] = useState(null);
   const [impactSearchInput, setImpactSearchInput] = useState("");
   const [impactActiveQuery, setImpactActiveQuery] = useState("");
   const [impactSelectedJournal, setImpactSelectedJournal] = useState("Todas las revistas");
@@ -127,10 +285,7 @@ export default function App() {
   const [hasFetchedImpactOnce, setHasFetchedImpactOnce] = useState(false);
 
   // Pestañas Personalizadas
-  const [customTabs, setCustomTabs] = useState(() => {
-    const saved = localStorage.getItem('eduradar_biogeo_custom_tabs');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [customTabs, setCustomTabs] = useState(leerPestanas);
 
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -143,56 +298,36 @@ export default function App() {
       setIsLoading(true);
       setError(null);
       try {
-        const issnArray = ALL_ISSNS.split('|');
-        const chunkSize = 40;
-        const issnChunks = [];
-        for (let i = 0; i < issnArray.length; i += chunkSize) {
-          issnChunks.push(issnArray.slice(i, i + chunkSize).join('|'));
-        }
-
-        const fetchPromises = issnChunks.map(chunk => {
-          const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${chunk}&sort=publication_date:desc&per-page=200&mailto=${CORREO_ADMIN}`;
-          return fetch(url, { cache: 'no-store' }).then(res => {
-            if (!res.ok) throw new Error("Error API OpenAlex");
-            return res.json();
-          });
-        });
-
-        // Incluir revistas con ID directo de OpenAlex (Alambique y E.C. Tierra)
-        fetchPromises.push(
-          fetch(`https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}&sort=publication_date:desc&per-page=200&mailto=${CORREO_ADMIN}`, { cache: 'no-store' })
-            .then(res => res.ok ? res.json() : { results: [] })
-            .catch(() => ({ results: [] }))
+        const { works, revistasFallidas } = await pedirPorRevista(
+          JOURNALS,
+          `&sort=publication_date:desc&per-page=${RADAR_POR_REVISTA}`,
+          { cache: 'no-store' }
         );
-
-        const resultsArray = await Promise.all(fetchPromises);
+        setRadarAviso(avisoRevistasFallidas(revistasFallidas));
         const seenIds = new Set();
         let combined = [];
 
-        resultsArray.forEach(data => {
-          if (data?.results) {
-            data.results.forEach(work => {
-              if (!seenIds.has(work.id)) {
-                seenIds.add(work.id);
-                const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
-                combined.push({
-                  id: work.id || Math.random().toString(),
-                  title: work.title || "Título no disponible",
-                  authors: work.authorships?.length > 0 
-                    ? work.authorships.map(a => a.author?.display_name).filter(Boolean) 
-                    : ["Autores desconocidos"],
-                  journal: work.primary_location?.source?.display_name || "Revista Científica",
-                  year: work.publication_year || "Año desconocido",
-                  date: work.publication_date || "",
-                  isOpenAccess: work.open_access?.is_oa || false,
-                  pdfUrl: pdfUrl,
-                  citedBy: work.cited_by_count || 0,
-                  url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
-                  abstract: reconstruirAbstract(work.abstract_inverted_index),
-                  tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
-                  diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
-                });
-              }
+        works.forEach(work => {
+          if (!seenIds.has(work.id) && !esFechaFutura(work.publication_date)) {
+            seenIds.add(work.id);
+            const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
+            combined.push({
+              id: work.id || Math.random().toString(),
+              title: work.title || "Título no disponible",
+              authors: work.authorships?.length > 0 
+                ? work.authorships.map(a => a.author?.display_name).filter(Boolean) 
+                : ["Autores desconocidos"],
+              journal: work.primary_location?.source?.display_name || "Revista Científica",
+              year: work.publication_year || "Año desconocido",
+              date: work.publication_date || "",
+              isOpenAccess: work.open_access?.is_oa || false,
+              pdfUrl: pdfUrl,
+              citedBy: work.cited_by_count || 0,
+              doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
+              url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
+              abstract: reconstruirAbstract(work.abstract_inverted_index),
+              tags: extraerTags(work),
+              diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
             });
           }
         });
@@ -200,13 +335,13 @@ export default function App() {
         combined.sort((a, b) => new Date(b.date) - new Date(a.date));
         setArticles(combined);
       } catch (err) {
-        setError("Error de conexión. Verifica tu acceso a internet.");
+        setError(mensajeErrorOpenAlex(err, "Error de conexión. Verifica tu acceso a internet."));
       } finally {
         setIsLoading(false);
       }
     };
     fetchArticles();
-  }, []);
+  }, [apiKey]);
 
   // Función para buscar en el Explorador de Impacto / Más Citados
   const fetchImpactArticles = useCallback(async (query = "", journal = "Todas las revistas", limit = 50) => {
@@ -214,51 +349,26 @@ export default function App() {
     setImpactError(null);
     try {
       const searchQuery = query.trim() ? `&search=${encodeURIComponent(query.trim())}` : '';
-      let worksList = [];
+      // "Todas las revistas": una petición por revista con el mismo cupo (limit), porque el
+      // top global podría salir entero de una sola revista. Luego se mezcla y se recorta.
+      const revistas = journal === "Todas las revistas"
+        ? JOURNALS
+        : JOURNALS.filter(j => j.name.toLowerCase() === journal.toLowerCase());
+      const { works, revistasFallidas } = await pedirPorRevista(
+        revistas,
+        `${searchQuery}&sort=cited_by_count:desc&per-page=${limit}`
+      );
+      setImpactAviso(avisoRevistasFallidas(revistasFallidas));
 
-      if (journal === "Alambique") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306501300${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
-      } else if (journal === "Enseñanza de las Ciencias de la Tierra") {
-        const url = `https://api.openalex.org/works?filter=primary_location.source.id:S4306509504|S4306509503${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
-      } else if (journal !== "Todas las revistas") {
-        const found = JOURNALS.find(j => j.name.toLowerCase() === journal.toLowerCase());
-        const targetIssns = (found && found.issns.length) ? found.issns.join('|') : ALL_ISSNS;
-        const url = `https://api.openalex.org/works?filter=primary_location.source.issn:${targetIssns}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          worksList = data.results || [];
-        }
-      } else {
-        // Todas las revistas: consultamos por ISSNs y por Source IDs combinados
-        const urlIssns = `https://api.openalex.org/works?filter=primary_location.source.issn:${ALL_ISSNS}${searchQuery}&sort=cited_by_count:desc&per-page=${limit}&mailto=${CORREO_ADMIN}`;
-        const urlSources = `https://api.openalex.org/works?filter=primary_location.source.id:${EXTRA_SOURCE_IDS}${searchQuery}&sort=cited_by_count:desc&per-page=25&mailto=${CORREO_ADMIN}`;
-        
-        const [resIssns, resSources] = await Promise.all([
-          fetch(urlIssns).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] })),
-          fetch(urlSources).then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] }))
-        ]);
+      const mergedMap = new Map();
+      works.forEach(w => {
+        if (w && w.id) mergedMap.set(w.id, w);
+      });
+      const worksList = Array.from(mergedMap.values())
+        .sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0))
+        .slice(0, limit);
 
-        const mergedMap = new Map();
-        [...(resIssns.results || []), ...(resSources.results || [])].forEach(w => {
-          if (w && w.id) mergedMap.set(w.id, w);
-        });
-        worksList = Array.from(mergedMap.values())
-          .sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0))
-          .slice(0, limit);
-      }
-
-      const parsed = worksList.map(work => {
+      const parsed = worksList.filter(work => !esFechaFutura(work.publication_date)).map(work => {
         const pdfUrl = work.best_oa_location?.pdf_url || (work.open_access?.is_oa ? work.open_access?.oa_url : null) || null;
         return {
           id: work.id || Math.random().toString(),
@@ -272,9 +382,10 @@ export default function App() {
           isOpenAccess: work.open_access?.is_oa || false,
           pdfUrl: pdfUrl,
           citedBy: work.cited_by_count || 0,
+                  doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
           url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
           abstract: reconstruirAbstract(work.abstract_inverted_index),
-          tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
+          tags: extraerTags(work),
           diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
         };
       });
@@ -282,7 +393,7 @@ export default function App() {
       setImpactArticles(parsed);
       setHasFetchedImpactOnce(true);
     } catch (err) {
-      setImpactError("No se pudieron cargar los artículos más citados. Comprueba tu conexión.");
+      setImpactError(mensajeErrorOpenAlex(err, "No se pudieron cargar los artículos más citados. Comprueba tu conexión."));
     } finally {
       setIsLoadingImpact(false);
     }
@@ -294,6 +405,26 @@ export default function App() {
       fetchImpactArticles("", impactSelectedJournal, impactLimit);
     }
   }, [viewMode, hasFetchedImpactOnce, impactSelectedJournal, impactLimit, fetchImpactArticles]);
+
+  const openSettings = () => {
+    setApiKeyDraft(apiKey);
+    setSettingsFeedback(null);
+    setShowSettings(true);
+  };
+
+  const handleSaveApiKey = (e) => {
+    if (e) e.preventDefault();
+    const clave = apiKeyDraft.trim();
+    if (!guardarApiKey(clave)) {
+      setSettingsFeedback("Tu navegador no permite guardar datos locales; la clave no se ha guardado.");
+      return;
+    }
+    setShowSettings(false);
+    if (clave !== apiKey) {
+      setApiKey(clave);
+      setHasFetchedImpactOnce(false);
+    }
+  };
 
   const handleImpactSearchSubmit = (e) => {
     if (e) e.preventDefault();
@@ -349,12 +480,10 @@ export default function App() {
       let matchesPeriod = true;
       if (selectedPeriod === "30d") {
         matchesPeriod = article.diasTranscurridos <= 30;
-      } else if (selectedPeriod === "2026") {
-        matchesPeriod = String(article.year) === "2026";
-      } else if (selectedPeriod === "2025") {
-        matchesPeriod = String(article.year) === "2025";
+      } else if (/^\d{4}$/.test(selectedPeriod)) {
+        matchesPeriod = String(article.year) === selectedPeriod;
       } else if (selectedPeriod === "older") {
-        matchesPeriod = Number(article.year) <= 2024;
+        matchesPeriod = Number(article.year) <= ANIO_ACTUAL - 2;
       }
 
       return matchesSearch && matchesJournal && matchesTags && matchesOA && matchesPeriod;
@@ -394,7 +523,7 @@ export default function App() {
   const articulosGeologia = useMemo(() => {
     return filteredArticles.filter(article => {
       const text = `${article.title} ${article.abstract} ${article.tags.join(' ')}`.toLowerCase();
-      return GEOLOGIA_KEYWORDS.some(k => new RegExp(k, 'i').test(text));
+      return GEOLOGIA_REGEX.test(text);
     });
   }, [filteredArticles]);
 
@@ -413,7 +542,7 @@ export default function App() {
     };
     const updated = [...customTabs, newTab];
     setCustomTabs(updated);
-    localStorage.setItem('eduradar_biogeo_custom_tabs', JSON.stringify(updated));
+    guardarPestanas(updated);
     setViewMode(`custom_${newTab.id}`);
   };
 
@@ -421,7 +550,7 @@ export default function App() {
     if(!window.confirm("¿Eliminar esta pestaña?")) return;
     const updated = customTabs.filter(t => t.id !== id);
     setCustomTabs(updated);
-    localStorage.setItem('eduradar_biogeo_custom_tabs', JSON.stringify(updated));
+    guardarPestanas(updated);
     if (viewMode === `custom_${id}`) setViewMode("historico");
   };
 
@@ -454,7 +583,9 @@ export default function App() {
     el.value = text;
     document.body.appendChild(el);
     el.select();
-    try { document.execCommand('copy'); setTranslateFeedback(platform); setTimeout(() => setTranslateFeedback(null), 4000); } catch (err) {}
+    try { document.execCommand('copy'); setTranslateFeedback(platform); setTimeout(() => setTranslateFeedback(null), 4000); } catch {
+      // Si el navegador bloquea la copia, se abre igualmente el traductor.
+    }
     document.body.removeChild(el);
 
     const url = platform === 'deepl' 
@@ -465,26 +596,40 @@ export default function App() {
 
   const handleCopyToMarkdown = (article) => {
     const today = new Date().toISOString().split('T')[0];
-    const formattedTags = (article.tags || []).map(t => `  - ${t.toLowerCase().replace(/[^a-z0-9]/g, '_')}`).join('\n');
-    const safeTitle = (article.title || "").replace(/"/g, '\\"');
-    const safeJournal = (article.journal || "").replace(/"/g, '\\"');
+    // Cadena YAML entre comillas dobles: escapa barras invertidas, comillas y saltos de línea.
+    const yaml = (valor) => `"${String(valor ?? "").replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ')}"`;
+    // Tags de Obsidian: conservan acentos y ñ; el resto de separadores pasa a "_".
+    const formattedTags = Array.from(new Set((article.tags || [])
+      .map(t => t.normalize('NFC').toLocaleLowerCase('es').replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, ''))
+      .filter(t => t && !/^\d+$/.test(t))))
+      .map(t => `\n  - ${t}`).join('');
+    const autores = (article.authors || []).filter(a => a && a !== "Autores desconocidos");
+    const formattedAutores = autores.length ? '\n' + autores.map(a => `  - ${yaml(a)}`).join('\n') : ' []';
+    const anio = Number.isInteger(article.year) ? article.year : '';
+    // En el cuerpo Markdown no hay que escapar comillas; solo se evitan saltos de línea.
+    const safeTitle = (article.title || "").replace(/[\r\n]+/g, ' ');
+    const safeJournal = (article.journal || "").replace(/[\r\n]+/g, ' ');
 
     const template = `---
 tipo: lectura_cientifica
 estado: pendiente
+titulo: ${yaml(article.title)}
+autores:${formattedAutores}
+año: ${anio}
+doi: ${article.doi ? yaml(article.doi) : '""'}
 tags:
   - didactica_ciencias
-  - didactica_biogeo
-${formattedTags}
+  - didactica_biogeo${formattedTags}
 fecha: ${today}
-revista: "${safeJournal}"
+revista: ${yaml(article.journal)}
 citas: ${article.citedBy}
-archivo: "${article.url}"
+archivo: ${yaml(article.url)}
 ---
 # ${safeTitle}
 
 📄 Documento Original
 [Enlace a la fuente (${safeJournal})](${article.url})
+${article.doi ? `DOI: [${article.doi}](https://doi.org/${article.doi})` : ''}
 ${article.pdfUrl ? `[Descargar PDF directo](${article.pdfUrl})` : ''}
 
 🧠 Mis Notas y Reflexiones Pedagógicas
@@ -713,6 +858,14 @@ Idea principal:
                 </h1>
                 <p className="text-xs text-slate-500 font-medium">Radar de Didáctica de la Biología y la Geología</p>
               </div>
+              <button
+                onClick={openSettings}
+                className="ml-auto md:ml-2 p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-full transition-colors cursor-pointer"
+                title="Ajustes (API key de OpenAlex)"
+                aria-label="Ajustes"
+              >
+                <Settings size={18} />
+              </button>
             </div>
             
             {/* Buscador para vistas de Novedades */}
@@ -772,9 +925,9 @@ Idea principal:
                   >
                     <option value="all">Cualquier fecha</option>
                     <option value="30d">Últimos 30 días</option>
-                    <option value="2026">Año 2026</option>
-                    <option value="2025">Año 2025</option>
-                    <option value="older">2024 o anteriores</option>
+                    <option value={String(ANIO_ACTUAL)}>Año {ANIO_ACTUAL}</option>
+                    <option value={String(ANIO_ACTUAL - 1)}>Año {ANIO_ACTUAL - 1}</option>
+                    <option value="older">{ANIO_ACTUAL - 2} o anteriores</option>
                   </select>
                 </div>
 
@@ -957,6 +1110,13 @@ Idea principal:
                 </div>
               </div>
 
+              {JOURNALS.find(j => j.name === impactSelectedJournal)?.coverageNote && (
+                <div className="mt-3 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+                  <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+                  {JOURNALS.find(j => j.name === impactSelectedJournal).coverageNote}
+                </div>
+              )}
+
               {/* Chips Temáticos Rápidos */}
               <div className="mt-4 pt-3 border-t border-amber-200/60">
                 <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
@@ -987,6 +1147,7 @@ Idea principal:
               <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex gap-4"><AlertCircle/><p className="font-medium">{impactError}</p></div>
             ) : (
               <div>
+                {impactAviso && <AvisoParcial texto={impactAviso} />}
                 <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200">
                   <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
                     <Trophy size={16} className="text-amber-500" />
@@ -1017,6 +1178,13 @@ Idea principal:
           </div>
         ) : (
           <div>
+            {radarAviso && <AvisoParcial texto={radarAviso} />}
+            {/^alambique/i.test(selectedJournal) && (
+              <div className="mb-4 flex items-start gap-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+                <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-amber-600" />
+                {JOURNALS.find(j => j.name === "Alambique")?.coverageNote}
+              </div>
+            )}
             {/* Si hay filtros activos Y NO estamos en una pestaña base, mostramos los resultados filtrados globalmente */}
             {(activeFiltersCount > 0 && !['radar', 'biologia', 'geologia'].includes(viewMode)) || viewMode.startsWith('custom_') ? (
               <div className="space-y-4">
@@ -1131,7 +1299,12 @@ Idea principal:
                       <ul className="text-sm text-slate-700 space-y-1.5 pl-2 border-l-2 border-emerald-200">
                         {JOURNALS.filter(j => j.category === cat).map(rev => (
                           <li key={rev.name} className="flex items-start justify-between gap-2">
-                            <span className="font-medium">{rev.name}</span>
+                            <span className="font-medium">
+                              {rev.name}
+                              {rev.coverageNote && (
+                                <span className="block text-[11px] font-semibold text-amber-700">{rev.coverageNote}</span>
+                              )}
+                            </span>
                             <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{rev.issns[0]}</span>
                           </li>
                         ))}
@@ -1141,6 +1314,43 @@ Idea principal:
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: AJUSTES (API KEY DE OPENALEX) */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" onClick={() => setShowSettings(false)}>
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-emerald-50">
+              <h2 className="text-xl font-bold text-emerald-900 flex items-center gap-2"><Settings size={22}/> Ajustes</h2>
+              <button onClick={() => setShowSettings(false)} className="p-1 hover:bg-emerald-200 text-emerald-900 rounded-full transition-colors cursor-pointer"><X size={20} /></button>
+            </div>
+            <form onSubmit={handleSaveApiKey} className="p-6 space-y-4">
+              <label htmlFor="openalex-api-key" className="block text-sm font-bold text-slate-700 flex items-center gap-2">
+                <KeyRound size={16} className="text-emerald-700"/> API key de OpenAlex (opcional)
+              </label>
+              <input
+                id="openalex-api-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={apiKeyDraft}
+                onChange={e => setApiKeyDraft(e.target.value)}
+                placeholder="Pega aquí tu clave gratuita"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+              />
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Sin clave, la app usa el cupo diario gratuito compartido por tu red. Con tu propia clave tienes un cupo propio.
+                Consíguela en <a href="https://openalex.org/settings/api" target="_blank" rel="noopener noreferrer" className="text-emerald-700 font-bold hover:underline">openalex.org</a>.
+                Se guarda solo en este navegador; déjala vacía para borrarla.
+              </p>
+              {settingsFeedback && <p className="text-xs font-semibold text-red-700">{settingsFeedback}</p>}
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setShowSettings(false)} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer">Cancelar</button>
+                <button type="submit" className="px-4 py-2 text-sm font-bold bg-emerald-800 text-white rounded-lg hover:bg-emerald-700 cursor-pointer">Guardar</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
