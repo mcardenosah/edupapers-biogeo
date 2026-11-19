@@ -55,6 +55,34 @@ const mensajeErrorOpenAlex = (err, porDefecto) => {
   return porDefecto;
 };
 
+// Etiquetas de un trabajo: topics (clasificación actual de OpenAlex) y keywords.
+// Sustituye a concepts, que OpenAlex ha dejado obsoleto.
+const extraerTags = (work) => {
+  const topics = (work.topics || []).slice(0, 3).map(t => t.display_name);
+  const keywords = (work.keywords || []).slice(0, 3).map(k => k.display_name);
+  return Array.from(new Set([...topics, ...keywords].filter(Boolean)));
+};
+
+// --- Pestañas personalizadas en localStorage (puede fallar en modo privado o con datos bloqueados) ---
+const CUSTOM_TABS_STORAGE = 'eduradar_biogeo_custom_tabs';
+
+const leerPestanas = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_TABS_STORAGE) || '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+};
+
+const guardarPestanas = (tabs) => {
+  try {
+    localStorage.setItem(CUSTOM_TABS_STORAGE, JSON.stringify(tabs));
+  } catch {
+    // Sin almacenamiento: las pestañas solo duran hasta recargar la página.
+  }
+};
+
 const reconstruirAbstract = (invertedIndex) => {
   if (!invertedIndex) return "Resumen original no disponible en la base de datos abierta.";
   const words = [];
@@ -129,14 +157,20 @@ const BIOLOGIA_KEYWORDS = [
   'fisiología', 'organism', 'nature-based', 'living organisms'
 ];
 
+// Con límites de palabra para evitar falsos positivos ("rock" en "rocket", "mineral" en
+// "mineralization" de un artículo de nutrición...). Se usa un límite Unicode en vez de \b
+// porque \b de JavaScript trata las letras acentuadas como separadores.
 const GEOLOGIA_KEYWORDS = [
-  '\\bgeology\\b', '\\bgeología\\b', 'earth science', 'ciencias de la tierra', 
-  'geoscience', 'geociencias', 'tectonics', 'tectónica', 'plate tectonics', 
-  'paleontology', 'paleontología', 'mineral', 'minerales', 'rock', 'rocas', 
-  'volcano', 'volcanes', 'volcanism', 'earthquake', 'terremoto', 'sismicidad', 
-  'seismic', 'geosphere', 'geosfera', 'fossil', 'fósiles', 'hydrogeology', 
-  'stratigraphy', 'estratigrafía', 'sediment', 'geomorfología', 'geomorphology'
+  'geology', 'geología', 'earth sciences?', 'ciencias de la tierra',
+  'geosciences?', 'geociencias', 'tectonics', 'tectónicas?', 'plate tectonics',
+  'paleontology', 'paleontología', 'minerals?', 'minerales', 'rocks?', 'rocas?',
+  'volcano(?:es|s)?', 'volcán', 'volcanes', 'volcanism', 'volcanismo', 'earthquakes?', 'terremotos?',
+  'sismicidad', 'seismic', 'geosphere', 'geosfera', 'fossils?', 'fósil', 'fósiles', 'hydrogeology',
+  'stratigraphy', 'estratigrafía', 'sediments?', 'sedimentos?', 'geomorfología', 'geomorphology'
 ];
+const GEOLOGIA_REGEX = new RegExp(`(?<![\\p{L}\\p{N}])(?:${GEOLOGIA_KEYWORDS.join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+
+const ANIO_ACTUAL = new Date().getFullYear();
 
 const QUICK_SEARCH_TOPICS = [
   { label: 'Evolución y Selección Natural', query: 'evolution natural selection' },
@@ -186,10 +220,7 @@ export default function App() {
   const [hasFetchedImpactOnce, setHasFetchedImpactOnce] = useState(false);
 
   // Pestañas Personalizadas
-  const [customTabs, setCustomTabs] = useState(() => {
-    const saved = localStorage.getItem('eduradar_biogeo_custom_tabs');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [customTabs, setCustomTabs] = useState(leerPestanas);
 
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -244,7 +275,7 @@ export default function App() {
                   citedBy: work.cited_by_count || 0,
                   url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
                   abstract: reconstruirAbstract(work.abstract_inverted_index),
-                  tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
+                  tags: extraerTags(work),
                   diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
                 });
               }
@@ -320,7 +351,7 @@ export default function App() {
           citedBy: work.cited_by_count || 0,
           url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
           abstract: reconstruirAbstract(work.abstract_inverted_index),
-          tags: work.concepts ? work.concepts.slice(0, 5).map(c => c.display_name) : [],
+          tags: extraerTags(work),
           diasTranscurridos: calcularDiasTranscurridos(work.publication_date)
         };
       });
@@ -415,12 +446,10 @@ export default function App() {
       let matchesPeriod = true;
       if (selectedPeriod === "30d") {
         matchesPeriod = article.diasTranscurridos <= 30;
-      } else if (selectedPeriod === "2026") {
-        matchesPeriod = String(article.year) === "2026";
-      } else if (selectedPeriod === "2025") {
-        matchesPeriod = String(article.year) === "2025";
+      } else if (/^\d{4}$/.test(selectedPeriod)) {
+        matchesPeriod = String(article.year) === selectedPeriod;
       } else if (selectedPeriod === "older") {
-        matchesPeriod = Number(article.year) <= 2024;
+        matchesPeriod = Number(article.year) <= ANIO_ACTUAL - 2;
       }
 
       return matchesSearch && matchesJournal && matchesTags && matchesOA && matchesPeriod;
@@ -460,7 +489,7 @@ export default function App() {
   const articulosGeologia = useMemo(() => {
     return filteredArticles.filter(article => {
       const text = `${article.title} ${article.abstract} ${article.tags.join(' ')}`.toLowerCase();
-      return GEOLOGIA_KEYWORDS.some(k => new RegExp(k, 'i').test(text));
+      return GEOLOGIA_REGEX.test(text);
     });
   }, [filteredArticles]);
 
@@ -479,7 +508,7 @@ export default function App() {
     };
     const updated = [...customTabs, newTab];
     setCustomTabs(updated);
-    localStorage.setItem('eduradar_biogeo_custom_tabs', JSON.stringify(updated));
+    guardarPestanas(updated);
     setViewMode(`custom_${newTab.id}`);
   };
 
@@ -487,7 +516,7 @@ export default function App() {
     if(!window.confirm("¿Eliminar esta pestaña?")) return;
     const updated = customTabs.filter(t => t.id !== id);
     setCustomTabs(updated);
-    localStorage.setItem('eduradar_biogeo_custom_tabs', JSON.stringify(updated));
+    guardarPestanas(updated);
     if (viewMode === `custom_${id}`) setViewMode("historico");
   };
 
@@ -846,9 +875,9 @@ Idea principal:
                   >
                     <option value="all">Cualquier fecha</option>
                     <option value="30d">Últimos 30 días</option>
-                    <option value="2026">Año 2026</option>
-                    <option value="2025">Año 2025</option>
-                    <option value="older">2024 o anteriores</option>
+                    <option value={String(ANIO_ACTUAL)}>Año {ANIO_ACTUAL}</option>
+                    <option value={String(ANIO_ACTUAL - 1)}>Año {ANIO_ACTUAL - 1}</option>
+                    <option value="older">{ANIO_ACTUAL - 2} o anteriores</option>
                   </select>
                 </div>
 
