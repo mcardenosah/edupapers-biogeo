@@ -273,6 +273,7 @@ export default function App() {
                   isOpenAccess: work.open_access?.is_oa || false,
                   pdfUrl: pdfUrl,
                   citedBy: work.cited_by_count || 0,
+                  doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
                   url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
                   abstract: reconstruirAbstract(work.abstract_inverted_index),
                   tags: extraerTags(work),
@@ -349,6 +350,7 @@ export default function App() {
           isOpenAccess: work.open_access?.is_oa || false,
           pdfUrl: pdfUrl,
           citedBy: work.cited_by_count || 0,
+                  doi: (work.doi || "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, ""),
           url: work.primary_location?.landing_page_url || work.doi || work.id || "#",
           abstract: reconstruirAbstract(work.abstract_inverted_index),
           tags: extraerTags(work),
@@ -560,26 +562,40 @@ export default function App() {
 
   const handleCopyToMarkdown = (article) => {
     const today = new Date().toISOString().split('T')[0];
-    const formattedTags = (article.tags || []).map(t => `  - ${t.toLowerCase().replace(/[^a-z0-9]/g, '_')}`).join('\n');
-    const safeTitle = (article.title || "").replace(/"/g, '\\"');
-    const safeJournal = (article.journal || "").replace(/"/g, '\\"');
+    // Cadena YAML entre comillas dobles: escapa barras invertidas, comillas y saltos de línea.
+    const yaml = (valor) => `"${String(valor ?? "").replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ')}"`;
+    // Tags de Obsidian: conservan acentos y ñ; el resto de separadores pasa a "_".
+    const formattedTags = Array.from(new Set((article.tags || [])
+      .map(t => t.normalize('NFC').toLocaleLowerCase('es').replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, ''))
+      .filter(t => t && !/^\d+$/.test(t))))
+      .map(t => `\n  - ${t}`).join('');
+    const autores = (article.authors || []).filter(a => a && a !== "Autores desconocidos");
+    const formattedAutores = autores.length ? '\n' + autores.map(a => `  - ${yaml(a)}`).join('\n') : ' []';
+    const anio = Number.isInteger(article.year) ? article.year : '';
+    // En el cuerpo Markdown no hay que escapar comillas; solo se evitan saltos de línea.
+    const safeTitle = (article.title || "").replace(/[\r\n]+/g, ' ');
+    const safeJournal = (article.journal || "").replace(/[\r\n]+/g, ' ');
 
     const template = `---
 tipo: lectura_cientifica
 estado: pendiente
+titulo: ${yaml(article.title)}
+autores:${formattedAutores}
+año: ${anio}
+doi: ${article.doi ? yaml(article.doi) : '""'}
 tags:
   - didactica_ciencias
-  - didactica_biogeo
-${formattedTags}
+  - didactica_biogeo${formattedTags}
 fecha: ${today}
-revista: "${safeJournal}"
+revista: ${yaml(article.journal)}
 citas: ${article.citedBy}
-archivo: "${article.url}"
+archivo: ${yaml(article.url)}
 ---
 # ${safeTitle}
 
 📄 Documento Original
 [Enlace a la fuente (${safeJournal})](${article.url})
+${article.doi ? `DOI: [${article.doi}](https://doi.org/${article.doi})` : ''}
 ${article.pdfUrl ? `[Descargar PDF directo](${article.pdfUrl})` : ''}
 
 🧠 Mis Notas y Reflexiones Pedagógicas
